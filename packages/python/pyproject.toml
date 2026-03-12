@@ -30,7 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.50"]
-server = ["fastapi>=0.110", "uvicorn[standard]", "sse-starlette>=1.6"]
+server = ["fastapi>=0.135", "uvicorn[standard]"]
 db = ["sqlalchemy[asyncio]>=2.0", "aiosqlite>=0.19"]
 postgres = ["asyncpg>=0.29"]
 all = ["dendrite[anthropic,openai,server,db,postgres]"]

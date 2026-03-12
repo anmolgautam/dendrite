@@ -171,4 +171,30 @@ class RunResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+class StreamEventType(StrEnum):
+    """Types of events emitted during streaming LLM responses."""
+
+    TEXT_DELTA = "text_delta"
+    TOOL_USE_START = "tool_use_start"
+    TOOL_USE_DELTA = "tool_use_delta"
+    TOOL_USE_END = "tool_use_end"
+    DONE = "done"
+
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """A single event from a streaming LLM response.
+
+    Providers yield these during complete_stream(). The loop and transport
+    layer consume them — strategies never touch provider-specific streaming APIs.
+    """
+
+    type: StreamEventType
+    text: str | None = None
+    tool_call: ToolCall | None = None
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    raw: Any = None
+
+
 RunInput = str | dict[str, Any]
