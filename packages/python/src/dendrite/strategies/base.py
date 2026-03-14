@@ -26,9 +26,9 @@ class Strategy(ABC):
     Subclasses implement the translation between the agent loop's
     universal types and the specific format the LLM expects/produces.
 
-    Two built-in strategies:
+    Built-in strategies:
         NativeToolCalling — uses provider's native tool_use API
-        PromptBasedReAct  — injects tools into the prompt as text
+        PromptBasedReAct  — injects tools into the prompt as text (planned)
     """
 
     @abstractmethod

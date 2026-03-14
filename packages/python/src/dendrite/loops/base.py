@@ -24,9 +24,9 @@ class Loop(ABC):
     """Base class for agent execution loops.
 
     Subclasses implement the iteration pattern:
-        ReActLoop     — think → act → observe → repeat
-        SingleShot    — one LLM call, no tools
-        PlanAndExecute — plan upfront, then execute steps
+        ReActLoop      — think → act → observe → repeat
+        SingleShot     — one LLM call, no tools (planned)
+        PlanAndExecute — plan upfront, then execute steps (planned)
     """
 
     @abstractmethod
