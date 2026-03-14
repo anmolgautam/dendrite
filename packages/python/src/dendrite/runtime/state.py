@@ -411,6 +411,8 @@ class SQLAlchemyStateStore:
                 for r in rows
             ]
 
+    _MAX_LIST_LIMIT = 1000
+
     async def list_runs(
         self,
         *,
@@ -423,13 +425,15 @@ class SQLAlchemyStateStore:
 
         from dendrite.db.models import AgentRun
 
+        capped_limit = min(limit, self._MAX_LIST_LIMIT)
+
         async with self._session_factory() as session:
             stmt = select(AgentRun).order_by(AgentRun.created_at.desc())
             if tenant_id is not None:
                 stmt = stmt.where(AgentRun.tenant_id == tenant_id)
             if status is not None:
                 stmt = stmt.where(AgentRun.status == status)
-            stmt = stmt.limit(limit).offset(offset)
+            stmt = stmt.limit(capped_limit).offset(offset)
 
             result = await session.execute(stmt)
             rows = result.scalars().all()

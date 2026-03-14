@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from dendrite.loops.react import ReActLoop
 from dendrite.strategies.native import NativeToolCalling
-from dendrite.types import RunStatus, UsageStats, generate_ulid
+from dendrite.types import RunStatus, generate_ulid
 
 if TYPE_CHECKING:
     from dendrite.agent import Agent
@@ -144,14 +144,17 @@ async def run(
         return result
 
     except Exception as exc:
-        # Persist ERROR status before re-raising
+        # Persist ERROR status before re-raising.
+        # Pass total_usage=None so finalize_run skips overwriting summary
+        # columns with zeros. Per-call token_usage rows (already persisted
+        # by the observer) remain the source of truth for errored runs.
         if state_store is not None:
             try:
                 await state_store.finalize_run(
                     run_id,
                     status=RunStatus.ERROR.value,
                     error=str(exc),
-                    total_usage=UsageStats(),
+                    total_usage=None,
                 )
             except Exception:
                 logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)

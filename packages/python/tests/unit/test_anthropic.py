@@ -577,3 +577,46 @@ class TestComplete:
         assert api_msgs[2]["content"][0]["tool_use_id"] == "toolu_round"
 
         assert result.text == "3"
+
+
+# ------------------------------------------------------------------
+# Provider hardening (F-07, F-08, F-09)
+# ------------------------------------------------------------------
+
+
+class TestProviderHardening:
+    def test_client_has_timeout(self) -> None:
+        """F-07: Client should be constructed with a timeout."""
+        provider = AnthropicProvider(api_key="sk-test", model="test")
+        assert provider._client.timeout.read == 120.0
+        assert provider._client.timeout.connect == 10.0
+
+    def test_custom_timeout(self) -> None:
+        """F-07: Custom timeout is forwarded to the client."""
+        provider = AnthropicProvider(api_key="sk-test", model="test", timeout=60.0)
+        assert provider._client.timeout.read == 60.0
+
+    def test_client_has_retries(self) -> None:
+        """F-08: Client should be constructed with retry support."""
+        provider = AnthropicProvider(api_key="sk-test", model="test")
+        assert provider._client.max_retries == 3
+
+    def test_custom_retries(self) -> None:
+        """F-08: Custom max_retries is forwarded to the client."""
+        provider = AnthropicProvider(api_key="sk-test", model="test", max_retries=5)
+        assert provider._client.max_retries == 5
+
+    def test_assert_replaced_with_valueerror(self, provider: AnthropicProvider) -> None:
+        """F-09: TOOL message with None call_id raises ValueError, not AssertionError."""
+        # Manually craft a message that bypasses __post_init__ to simulate
+        # a broken invariant (e.g. from deserialization or future code change)
+        msg = Message.__new__(Message)
+        object.__setattr__(msg, "role", Role.TOOL)
+        object.__setattr__(msg, "content", "result")
+        object.__setattr__(msg, "name", "add")
+        object.__setattr__(msg, "call_id", None)
+        object.__setattr__(msg, "tool_calls", None)
+        object.__setattr__(msg, "meta", {})
+
+        with pytest.raises(ValueError, match="TOOL message missing call_id"):
+            provider._convert_messages([msg])

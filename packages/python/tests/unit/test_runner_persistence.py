@@ -118,6 +118,10 @@ class TestRunnerPersistence:
         finalized = store.finalized_runs[0]
         assert finalized["status"] == "error"
         assert "LLM exploded" in finalized["error"]
+        # F-05: Error path should pass total_usage=None (not zeroed UsageStats)
+        # so that finalize_run doesn't overwrite summary columns with zeros.
+        # Per-call token_usage rows are the source of truth for errored runs.
+        assert finalized["total_usage"] is None
 
     async def test_run_id_consistent_across_create_and_finalize(self) -> None:
         store = RecordingStateStore()

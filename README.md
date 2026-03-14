@@ -8,6 +8,21 @@ Client tool execution, human-in-the-loop, resumability, full observability. From
 
 Under active development. Not yet published.
 
+### Alpha Limitations (v0.1.0-alpha.2)
+
+This is an early alpha. The following features are **planned but not yet shipped**:
+
+- Client tool execution (pause/resume for client-side tools)
+- Human-in-the-loop approval flows
+- SSE transport and polling endpoints
+- Run-scoped HMAC tokens and nonce guards
+- Worker pool with crash recovery
+- Filesystem sandbox for tool isolation
+- TypeScript client SDK
+- OpenAI / multi-provider support
+
+What **is** shipped: agent loop, ReAct, tool calling, Anthropic provider, SQLite/Postgres persistence, CLI, full trace recording, and token usage tracking.
+
 ## Packages
 
 | Package | Language | Status |
@@ -24,8 +39,8 @@ Under active development. Not yet published.
 
 ```bash
 cd packages/python
-pip install -e ".[dev]"    # Install in editable mode with dev tools
-pre-commit install         # Set up git hooks (auto-lint on commit)
+pip install -e ".[dev,db,anthropic]"    # Install with all dev dependencies
+pre-commit install                      # Set up git hooks (auto-lint on commit)
 ```
 
 ### Commands

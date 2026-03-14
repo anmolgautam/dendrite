@@ -228,3 +228,21 @@ class TestSchemaGeneration:
             async def fn() -> str:
                 """Test."""
                 return ""
+
+    def test_untyped_param_raises_type_error(self) -> None:
+        """F-06: Parameters without type hints must fail fast at decoration time."""
+        with pytest.raises(TypeError, match="has no type hint"):
+
+            @tool()
+            async def fn(x: int, y) -> int:  # y has no type hint
+                """Test."""
+                return x
+
+    def test_all_untyped_params_raise_type_error(self) -> None:
+        """F-06: Even a single untyped param (the first one) raises."""
+        with pytest.raises(TypeError, match="has no type hint"):
+
+            @tool()
+            async def fn(a) -> str:  # noqa: ANN001
+                """Test."""
+                return str(a)

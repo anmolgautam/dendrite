@@ -484,8 +484,8 @@ class TestReActLoopUsage:
 
 
 class TestReActLoopClarification:
-    async def test_clarification_returns_as_answer(self) -> None:
-        """M4: Clarification action is handled by returning the question as answer."""
+    async def test_clarification_returns_waiting_human_input(self) -> None:
+        """Clarification action returns WAITING_HUMAN_INPUT status with the question as answer."""
         from dendrite.strategies.base import Strategy
 
         class ClarifyStrategy(Strategy):
@@ -518,7 +518,7 @@ class TestReActLoopClarification:
             user_input="Do something",
         )
 
-        assert result.status == RunStatus.SUCCESS
+        assert result.status == RunStatus.WAITING_HUMAN_INPUT
         assert result.answer == "Which format do you want?"
         assert isinstance(result.steps[0].action, Clarification)
 
@@ -700,6 +700,242 @@ class TestReActLoopCostAccumulation:
         )
 
         assert result.usage.cost_usd == pytest.approx(0.005)
+
+
+# ------------------------------------------------------------------
+# ReActLoop — final message persistence (F-01, F-03)
+# ------------------------------------------------------------------
+
+
+class TestReActLoopFinalMessagePersistence:
+    async def test_finish_notifies_observer_with_assistant_message(self) -> None:
+        """F-01: The final assistant message must be notified to the observer on Finish."""
+        from dendrite.loops.base import LoopObserver
+
+        recorded_messages: list[Message] = []
+
+        class RecordingObserver(LoopObserver):
+            async def on_message_appended(self, message: Message, iteration: int) -> None:
+                recorded_messages.append(message)
+
+            async def on_llm_call_completed(self, response, iteration: int) -> None:
+                pass
+
+            async def on_tool_completed(self, tool_call, tool_result, iteration: int) -> None:
+                pass
+
+        llm = MockLLM([LLMResponse(text="The answer is 42")])
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Question?",
+            observer=RecordingObserver(),
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        # Should have: user message + final assistant message
+        assert len(recorded_messages) == 2
+        assert recorded_messages[0].role == Role.USER
+        assert recorded_messages[1].role == Role.ASSISTANT
+        assert recorded_messages[1].content == "The answer is 42"
+
+    async def test_clarification_notifies_observer_with_assistant_message(self) -> None:
+        """F-03: The assistant message must be notified on Clarification too."""
+        from dendrite.loops.base import LoopObserver
+        from dendrite.strategies.base import Strategy
+
+        recorded_messages: list[Message] = []
+
+        class RecordingObserver(LoopObserver):
+            async def on_message_appended(self, message: Message, iteration: int) -> None:
+                recorded_messages.append(message)
+
+            async def on_llm_call_completed(self, response, iteration: int) -> None:
+                pass
+
+            async def on_tool_completed(self, tool_call, tool_result, iteration: int) -> None:
+                pass
+
+        class ClarifyStrategy(Strategy):
+            def build_messages(self, *, system_prompt, history, tool_defs):
+                return [Message(role=Role.SYSTEM, content=system_prompt), *history], None
+
+            def parse_response(self, response):
+                return AgentStep(
+                    reasoning="Need info",
+                    action=Clarification(question="Which one?"),
+                )
+
+            def format_tool_result(self, result):
+                return Message(
+                    role=Role.TOOL, content=result.payload, name=result.name, call_id=result.call_id
+                )
+
+        llm = MockLLM([LLMResponse(text="clarifying")])
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=ClarifyStrategy(),
+            user_input="Do it",
+            observer=RecordingObserver(),
+        )
+
+        assert result.status == RunStatus.WAITING_HUMAN_INPUT
+        # Should have: user message + final assistant message
+        assert len(recorded_messages) == 2
+        assert recorded_messages[1].role == Role.ASSISTANT
+        assert recorded_messages[1].content == "clarifying"
+
+    async def test_tool_call_then_finish_persists_all_messages(self) -> None:
+        """Complete flow: tool call + finish should persist all messages including final."""
+        from dendrite.loops.base import LoopObserver
+
+        recorded_messages: list[Message] = []
+
+        class RecordingObserver(LoopObserver):
+            async def on_message_appended(self, message: Message, iteration: int) -> None:
+                recorded_messages.append(message)
+
+            async def on_llm_call_completed(self, response, iteration: int) -> None:
+                pass
+
+            async def on_tool_completed(self, tool_call, tool_result, iteration: int) -> None:
+                pass
+
+        tc = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="t1")
+        llm = MockLLM(
+            [
+                LLMResponse(text="Computing", tool_calls=[tc]),
+                LLMResponse(text="The sum is 3"),
+            ]
+        )
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="1+2?",
+            observer=RecordingObserver(),
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        roles = [m.role for m in recorded_messages]
+        # user, assistant (tool call), tool result, assistant (final answer)
+        assert roles == [Role.USER, Role.ASSISTANT, Role.TOOL, Role.ASSISTANT]
+        assert recorded_messages[-1].content == "The sum is 3"
+
+
+# ------------------------------------------------------------------
+# ReActLoop — observer warning surfacing (F-04)
+# ------------------------------------------------------------------
+
+
+class TestReActLoopObserverWarnings:
+    async def test_observer_failure_surfaces_in_meta(self) -> None:
+        """F-04: Observer exceptions should be captured in RunResult.meta, not silently lost."""
+        from dendrite.loops.base import LoopObserver
+
+        class FailingObserver(LoopObserver):
+            async def on_message_appended(self, message: Message, iteration: int) -> None:
+                raise RuntimeError("DB connection lost")
+
+            async def on_llm_call_completed(self, response, iteration: int) -> None:
+                pass
+
+            async def on_tool_completed(self, tool_call, tool_result, iteration: int) -> None:
+                pass
+
+        llm = MockLLM([LLMResponse(text="done")])
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Hi",
+            observer=FailingObserver(),
+        )
+
+        # Run should still succeed
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "done"
+        # But warnings should be surfaced
+        assert "observer_warnings" in result.meta
+        assert len(result.meta["observer_warnings"]) > 0
+
+    async def test_no_warnings_when_observer_healthy(self) -> None:
+        """No observer_warnings key when everything works fine."""
+        from dendrite.loops.base import LoopObserver
+
+        class HealthyObserver(LoopObserver):
+            async def on_message_appended(self, message, iteration):
+                pass
+
+            async def on_llm_call_completed(self, response, iteration):
+                pass
+
+            async def on_tool_completed(self, tool_call, tool_result, iteration):
+                pass
+
+        llm = MockLLM([LLMResponse(text="ok")])
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Hi",
+            observer=HealthyObserver(),
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert "observer_warnings" not in result.meta
+
+
+# ------------------------------------------------------------------
+# ReActLoop — tool execution timeout (F-10)
+# ------------------------------------------------------------------
+
+
+class TestReActLoopToolTimeout:
+    async def test_slow_tool_times_out(self) -> None:
+        """F-10: Tool exceeding timeout_seconds returns an error result."""
+        import asyncio
+
+        @tool(timeout_seconds=0.1)
+        async def slow_tool() -> str:
+            """A tool that takes too long."""
+            await asyncio.sleep(10)
+            return "never reached"
+
+        tc = ToolCall(name="slow_tool", params={}, provider_tool_call_id="t_slow")
+        llm = MockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="tool timed out"),
+            ]
+        )
+        agent = _make_agent(tools=[slow_tool])
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Do slow thing",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        # The timeout error should have been fed back to the LLM
+        second_call_msgs = llm.call_history[1]["messages"]
+        tool_msgs = [m for m in second_call_msgs if m.role == Role.TOOL]
+        assert len(tool_msgs) == 1
+        assert "timed out" in tool_msgs[0].content
 
 
 # Need to import UsageStats for the usage test

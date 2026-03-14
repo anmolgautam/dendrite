@@ -21,18 +21,18 @@ classifiers = [
 ]
 
 dependencies = [
-    "pydantic>=2.0",
-    "typer>=0.12",
-    "rich>=13.0",
-    "python-ulid>=2.0",
+    "pydantic>=2.0,<3.0",
+    "typer>=0.12,<1.0",
+    "rich>=13.0,<15.0",
+    "python-ulid>=2.0,<4.0",
 ]
 
 [project.optional-dependencies]
-anthropic = ["anthropic>=0.40"]
-openai = ["openai>=1.50"]
-server = ["fastapi>=0.135", "uvicorn[standard]"]
-db = ["sqlalchemy[asyncio]>=2.0", "aiosqlite>=0.19", "alembic>=1.13"]
-postgres = ["asyncpg>=0.29"]
+anthropic = ["anthropic>=0.40,<1.0"]
+openai = ["openai>=1.50,<3.0"]
+server = ["fastapi>=0.135,<1.0", "uvicorn[standard]"]
+db = ["sqlalchemy[asyncio]>=2.0,<3.0", "aiosqlite>=0.19,<1.0", "alembic>=1.13,<2.0"]
+postgres = ["asyncpg>=0.29,<1.0"]
 all = ["dendrite[anthropic,openai,server,db,postgres]"]
 dev = [
     "pytest>=8.0",
@@ -113,3 +113,9 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+    "src/dendrite/cli/*",
+    "src/dendrite/db/migrations/*",
+]

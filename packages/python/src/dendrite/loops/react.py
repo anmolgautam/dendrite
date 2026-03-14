@@ -55,7 +55,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _notify_message(observer: LoopObserver | None, message: Message, iteration: int) -> None:
+async def _notify_message(
+    observer: LoopObserver | None,
+    message: Message,
+    iteration: int,
+    warnings: list[str] | None = None,
+) -> None:
     """Notify observer of a message append, swallowing exceptions."""
     if observer is None:
         return
@@ -63,9 +68,16 @@ async def _notify_message(observer: LoopObserver | None, message: Message, itera
         await observer.on_message_appended(message, iteration)
     except Exception:
         logger.warning("Observer.on_message_appended failed", exc_info=True)
+        if warnings is not None:
+            warnings.append(f"on_message_appended failed at iteration {iteration}")
 
 
-async def _notify_llm(observer: LoopObserver | None, response: LLMResponse, iteration: int) -> None:
+async def _notify_llm(
+    observer: LoopObserver | None,
+    response: LLMResponse,
+    iteration: int,
+    warnings: list[str] | None = None,
+) -> None:
     """Notify observer of an LLM call completion, swallowing exceptions."""
     if observer is None:
         return
@@ -73,10 +85,16 @@ async def _notify_llm(observer: LoopObserver | None, response: LLMResponse, iter
         await observer.on_llm_call_completed(response, iteration)
     except Exception:
         logger.warning("Observer.on_llm_call_completed failed", exc_info=True)
+        if warnings is not None:
+            warnings.append(f"on_llm_call_completed failed at iteration {iteration}")
 
 
 async def _notify_tool(
-    observer: LoopObserver | None, tool_call: ToolCall, tool_result: ToolResult, iteration: int
+    observer: LoopObserver | None,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    iteration: int,
+    warnings: list[str] | None = None,
 ) -> None:
     """Notify observer of a tool completion, swallowing exceptions."""
     if observer is None:
@@ -85,6 +103,8 @@ async def _notify_tool(
         await observer.on_tool_completed(tool_call, tool_result, iteration)
     except Exception:
         logger.warning("Observer.on_tool_completed failed", exc_info=True)
+        if warnings is not None:
+            warnings.append(f"on_tool_completed failed at iteration {iteration}")
 
 
 class ReActLoop(Loop):
@@ -116,7 +136,7 @@ class ReActLoop(Loop):
         """Execute the ReAct loop."""
         resolved_run_id = run_id or generate_ulid()
         tool_defs = agent.get_tool_defs()
-        tool_lookup, target_lookup = _build_tool_lookup(agent.tools)
+        tool_lookup, target_lookup, timeout_lookup = _build_tool_lookup(agent.tools)
 
         user_msg = Message(role=Role.USER, content=user_input)
         history: list[Message] = [user_msg]
@@ -124,6 +144,8 @@ class ReActLoop(Loop):
 
         steps: list[AgentStep] = []
         total_usage = UsageStats()
+
+        observer_warnings: list[str] = []
 
         for iteration in range(1, agent.max_iterations + 1):
             # 1. Build messages via strategy
@@ -135,7 +157,7 @@ class ReActLoop(Loop):
 
             # 2. Call the LLM
             response = await provider.complete(messages, tools=tools)
-            await _notify_llm(observer, response, iteration)
+            await _notify_llm(observer, response, iteration, observer_warnings)
 
             # Accumulate usage
             total_usage.input_tokens += response.usage.input_tokens
@@ -152,6 +174,18 @@ class ReActLoop(Loop):
 
             # 4. Check action type
             if isinstance(step.action, Finish):
+                # Persist the final assistant message before returning
+                assistant_msg = Message(
+                    role=Role.ASSISTANT,
+                    content=response.text or "",
+                    tool_calls=response.tool_calls,
+                )
+                history.append(assistant_msg)
+                await _notify_message(observer, assistant_msg, iteration, observer_warnings)
+
+                meta = {}
+                if observer_warnings:
+                    meta["observer_warnings"] = observer_warnings
                 return RunResult(
                     run_id=resolved_run_id,
                     status=RunStatus.SUCCESS,
@@ -159,16 +193,30 @@ class ReActLoop(Loop):
                     steps=steps,
                     iteration_count=iteration,
                     usage=total_usage,
+                    meta=meta,
                 )
 
             if isinstance(step.action, Clarification):
+                # Persist the assistant message before returning
+                assistant_msg = Message(
+                    role=Role.ASSISTANT,
+                    content=response.text or "",
+                    tool_calls=response.tool_calls,
+                )
+                history.append(assistant_msg)
+                await _notify_message(observer, assistant_msg, iteration, observer_warnings)
+
+                meta = {}
+                if observer_warnings:
+                    meta["observer_warnings"] = observer_warnings
                 return RunResult(
                     run_id=resolved_run_id,
-                    status=RunStatus.SUCCESS,
+                    status=RunStatus.WAITING_HUMAN_INPUT,
                     answer=step.action.question,
                     steps=steps,
                     iteration_count=iteration,
                     usage=total_usage,
+                    meta=meta,
                 )
 
             if isinstance(step.action, ToolCall):
@@ -179,7 +227,7 @@ class ReActLoop(Loop):
                     tool_calls=response.tool_calls,
                 )
                 history.append(assistant_msg)
-                await _notify_message(observer, assistant_msg, iteration)
+                await _notify_message(observer, assistant_msg, iteration, observer_warnings)
 
                 # Execute all tool calls from this turn and append results
                 # in the same order the assistant requested them.
@@ -187,39 +235,51 @@ class ReActLoop(Loop):
                 # step.action is only the first (AgentStep models one action).
                 all_calls: list[ToolCall] = step.meta.get("all_tool_calls", [step.action])
                 for tc in all_calls:
-                    tool_result = await _execute_tool(tc, tool_lookup, target_lookup)
-                    await _notify_tool(observer, tc, tool_result, iteration)
+                    tool_result = await _execute_tool(
+                        tc, tool_lookup, target_lookup, timeout_lookup
+                    )
+                    await _notify_tool(observer, tc, tool_result, iteration, observer_warnings)
                     result_msg = strategy.format_tool_result(tool_result)
                     history.append(result_msg)
-                    await _notify_message(observer, result_msg, iteration)
+                    await _notify_message(observer, result_msg, iteration, observer_warnings)
 
         # Max iterations reached
+        meta = {}
+        if observer_warnings:
+            meta["observer_warnings"] = observer_warnings
         return RunResult(
             run_id=resolved_run_id,
             status=RunStatus.MAX_ITERATIONS,
             steps=steps,
             iteration_count=agent.max_iterations,
             usage=total_usage,
+            meta=meta,
         )
 
 
 def _build_tool_lookup(
     tools: list[Callable[..., Any]],
-) -> tuple[dict[str, Callable[..., Any]], dict[str, ToolTarget]]:
-    """Build name → function and name → target lookups from the agent's tool list."""
+) -> tuple[dict[str, Callable[..., Any]], dict[str, ToolTarget], dict[str, float]]:
+    """Build name → function, name → target, and name → timeout lookups."""
     fn_lookup: dict[str, Callable[..., Any]] = {}
     target_lookup: dict[str, ToolTarget] = {}
+    timeout_lookup: dict[str, float] = {}
     for fn in tools:
         td = get_tool_def(fn)
         fn_lookup[td.name] = fn
         target_lookup[td.name] = td.target
-    return fn_lookup, target_lookup
+        timeout_lookup[td.name] = td.timeout_seconds
+    return fn_lookup, target_lookup, timeout_lookup
+
+
+_DEFAULT_TOOL_TIMEOUT = 30.0
 
 
 async def _execute_tool(
     tool_call: ToolCall,
     tool_lookup: dict[str, Callable[..., Any]],
     target_lookup: dict[str, ToolTarget] | None = None,
+    timeout_lookup: dict[str, float] | None = None,
 ) -> ToolResult:
     """Execute a tool function and return a ToolResult."""
     # Guard: refuse to execute non-server tools locally
@@ -250,12 +310,17 @@ async def _execute_tool(
             error=f"Unknown tool: {tool_call.name}",
         )
 
+    timeout_s = _DEFAULT_TOOL_TIMEOUT
+    if timeout_lookup is not None:
+        timeout_s = timeout_lookup.get(tool_call.name, _DEFAULT_TOOL_TIMEOUT)
+
     start = time.monotonic()
     try:
         if inspect.iscoroutinefunction(fn):
-            result = await fn(**tool_call.params)
+            coro = fn(**tool_call.params)
         else:
-            result = await asyncio.to_thread(fn, **tool_call.params)
+            coro = asyncio.to_thread(fn, **tool_call.params)
+        result = await asyncio.wait_for(coro, timeout=timeout_s)
 
         duration_ms = int((time.monotonic() - start) * 1000)
         try:
@@ -268,6 +333,17 @@ async def _execute_tool(
             call_id=tool_call.id,
             payload=payload,
             success=True,
+            duration_ms=duration_ms,
+        )
+    except TimeoutError:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        error_msg = f"Tool '{tool_call.name}' timed out after {timeout_s}s"
+        return ToolResult(
+            name=tool_call.name,
+            call_id=tool_call.id,
+            payload=json.dumps({"error": error_msg}),
+            success=False,
+            error=error_msg,
             duration_ms=duration_ms,
         )
     except Exception as e:

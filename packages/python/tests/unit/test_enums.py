@@ -6,7 +6,7 @@ from dendrite.db.enums import AgentRunStatus
 
 
 class TestAgentRunStatus:
-    def test_has_all_sprint2_values(self) -> None:
+    def test_has_all_values(self) -> None:
         values = {s.value for s in AgentRunStatus}
         assert values == {
             "pending",
@@ -15,6 +15,9 @@ class TestAgentRunStatus:
             "error",
             "max_iterations",
             "cancelled",
+            "waiting_client_tool",
+            "waiting_human_input",
+            "waiting_approval",
         }
 
     def test_is_str_enum(self) -> None:

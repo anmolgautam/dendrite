@@ -1,7 +1,7 @@
 .PHONY: test lint typecheck format ci clean
 
 test:
-	pytest tests/ -v
+	pytest tests/ -v --cov=src/dendrite --cov-report=term-missing --cov-fail-under=80
 
 lint:
 	ruff check .

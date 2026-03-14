@@ -2,13 +2,45 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 
 app = typer.Typer(name="db", help="Database management commands.", no_args_is_help=True)
 console = Console()
+
+
+def _build_alembic_config(url: str = "") -> Any:
+    """Build an Alembic Config programmatically.
+
+    Works both from a repo checkout (finds alembic.ini) and from a
+    pip-installed package (uses the migrations directory inside the
+    dendrite.db.migrations package as the script_location).
+    """
+    try:
+        from alembic.config import Config
+    except ImportError:
+        console.print("[red]Alembic not installed.[/red] Run: pip install dendrite[db]")
+        raise typer.Exit(1) from None
+
+    # Try to find alembic.ini on disk (repo checkout)
+    ini_path = _find_alembic_ini()
+    if ini_path is not None:
+        cfg = Config(str(ini_path))
+    else:
+        # Programmatic config for pip-installed packages
+        cfg = Config()
+        migrations_dir = str(Path(__file__).resolve().parent.parent / "db" / "migrations")
+        cfg.set_main_option("script_location", migrations_dir)
+
+    # Resolve database URL: explicit arg > env var > SQLite default
+    resolved_url = url or os.environ.get("DENDRITE_DATABASE_URL", "sqlite:///./dendrite.db")
+    cfg.set_main_option("sqlalchemy.url", resolved_url)
+
+    return cfg
 
 
 @app.command()
@@ -20,22 +52,11 @@ def migrate(
     """Run database migrations (alembic upgrade head)."""
     try:
         from alembic import command
-        from alembic.config import Config
     except ImportError:
         console.print("[red]Alembic not installed.[/red] Run: pip install dendrite[db]")
         raise typer.Exit(1) from None
 
-    # Locate alembic.ini relative to package root
-    ini_path = _find_alembic_ini()
-    if ini_path is None:
-        console.print("[red]Cannot find alembic.ini.[/red] Run from the project root.")
-        raise typer.Exit(1)
-
-    alembic_cfg = Config(str(ini_path))
-
-    # Override URL if provided (via config, not os.environ — no side effects)
-    if url:
-        alembic_cfg.set_main_option("sqlalchemy.url", url)
+    alembic_cfg = _build_alembic_config(url)
 
     console.print("[bold]Running migrations...[/bold]")
     try:
@@ -56,32 +77,17 @@ def status(
     """Show current migration revision."""
     try:
         from alembic import command
-        from alembic.config import Config
     except ImportError:
         console.print("[red]Alembic not installed.[/red] Run: pip install dendrite[db]")
         raise typer.Exit(1) from None
 
-    ini_path = _find_alembic_ini()
-    if ini_path is None:
-        console.print("[red]Cannot find alembic.ini.[/red] Run from the project root.")
-        raise typer.Exit(1)
-
-    alembic_cfg = Config(str(ini_path))
-
-    if url:
-        alembic_cfg.set_main_option("sqlalchemy.url", url)
-
+    alembic_cfg = _build_alembic_config(url)
     command.current(alembic_cfg, verbose=True)
 
 
 def _find_alembic_ini() -> Path | None:
-    """Find alembic.ini by walking up from CWD, or use package-relative path.
-
-    TODO(post-alpha): alembic.ini isn't included in the wheel (hatch only packages
-    src/dendrite/). For pip-installed users, either ship it as package data via
-    importlib.resources or generate the Alembic config programmatically.
-    """
-    # First, try CWD and parents
+    """Find alembic.ini by walking up from CWD, or use package-relative path."""
+    # Try CWD and parents
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
         candidate = parent / "alembic.ini"

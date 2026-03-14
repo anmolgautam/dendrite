@@ -52,12 +52,6 @@ def run(
     agent_name: str = typer.Option(
         "", "--agent", "-a", help="Agent class/variable name. Auto-detected if omitted."
     ),
-    api_key: str = typer.Option(
-        "",
-        "--api-key",
-        "-k",
-        help="LLM API key (visible in shell history; prefer ANTHROPIC_API_KEY env var).",
-    ),
 ) -> None:
     """Run an agent from a Python file."""
     # Load the module from the file
@@ -77,7 +71,7 @@ def run(
         raise typer.Exit(1)
 
     # Resolve the provider
-    provider = _resolve_provider(agent.model, api_key)
+    provider = _resolve_provider(agent.model)
 
     console.print(f"[bold]\\[Agent][/bold] Starting {agent.name}...")
     console.print()
@@ -111,14 +105,18 @@ def _load_module(path: Path) -> Any:
         console.print(f"[red]Cannot load module from:[/red] {path}")
         raise typer.Exit(1)
 
-    # Add parent directory to sys.path so relative imports work
+    # Temporarily add parent directory to sys.path so relative imports work
     parent = str(path.parent)
-    if parent not in sys.path:
+    added = parent not in sys.path
+    if added:
         sys.path.insert(0, parent)
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if added and parent in sys.path:
+            sys.path.remove(parent)
 
 
 def _find_agent(module: Any, agent_class: type, name: str) -> Any:
@@ -148,15 +146,15 @@ def _find_agent(module: Any, agent_class: type, name: str) -> Any:
     return None
 
 
-def _resolve_provider(model: str, api_key: str) -> Any:
+def _resolve_provider(model: str) -> Any:
     """Resolve an LLM provider from the model string."""
     import os
 
     # Sprint 1: Anthropic only. Future: parse model string for provider routing.
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         console.print(
-            "[red]No API key found.[/red] Set ANTHROPIC_API_KEY env var or use --api-key."
+            "[red]No API key found.[/red] Set the ANTHROPIC_API_KEY environment variable."
         )
         raise typer.Exit(1)
 

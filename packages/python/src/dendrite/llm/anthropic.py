@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import anthropic
+import httpx
 
 from dendrite.llm.base import LLMProvider
 from dendrite.types import (
@@ -62,8 +63,19 @@ class AnthropicProvider(LLMProvider):
         max_context_tokens=200_000,
     )
 
-    def __init__(self, api_key: str, model: str) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ) -> None:
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            max_retries=max_retries,
+        )
         self._model = model
 
     async def complete(
@@ -156,7 +168,10 @@ class AnthropicProvider(LLMProvider):
                     api_messages.append({"role": "assistant", "content": msg.content})
 
             elif msg.role == Role.TOOL:
-                assert msg.call_id is not None  # Guaranteed by __post_init__
+                if msg.call_id is None:
+                    raise ValueError(
+                        "TOOL message missing call_id — this violates Message.__post_init__"
+                    )
                 original_call = call_index.get(msg.call_id)
 
                 if original_call is None:

@@ -90,7 +90,10 @@ def _generate_schema(fn: Callable[..., Any]) -> dict[str, Any]:
 
         hint = hints.get(name)
         if hint is None:
-            continue
+            raise TypeError(
+                f"Parameter '{name}' of tool '{fn.__name__}' has no type hint. "
+                f"All tool parameters must be typed for schema generation."
+            )
 
         prop = _type_to_schema(hint)
 
