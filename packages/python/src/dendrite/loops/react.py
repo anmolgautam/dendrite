@@ -108,10 +108,7 @@ class ReActLoop(Loop):
                 )
 
             if isinstance(step.action, ToolCall):
-                # Execute the tool
-                tool_result = await _execute_tool(step.action, tool_lookup)
-
-                # Append assistant message with tool_calls to history
+                # Append assistant message with all tool_calls to history
                 assistant_msg = Message(
                     role=Role.ASSISTANT,
                     content=response.text or "",
@@ -119,9 +116,15 @@ class ReActLoop(Loop):
                 )
                 history.append(assistant_msg)
 
-                # Format and append tool result
-                result_msg = strategy.format_tool_result(tool_result)
-                history.append(result_msg)
+                # Execute all tool calls from this turn and append results
+                # in the same order the assistant requested them.
+                # step.meta["all_tool_calls"] contains the full list;
+                # step.action is only the first (AgentStep models one action).
+                all_calls: list[ToolCall] = step.meta.get("all_tool_calls", [step.action])
+                for tc in all_calls:
+                    tool_result = await _execute_tool(tc, tool_lookup)
+                    result_msg = strategy.format_tool_result(tool_result)
+                    history.append(result_msg)
 
         # Max iterations reached
         return RunResult(
@@ -167,7 +170,7 @@ async def _execute_tool(
             result = await asyncio.to_thread(fn, **tool_call.params)
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        payload = json.dumps(result) if not isinstance(result, str) else result
+        payload = json.dumps(result)
 
         return ToolResult(
             name=tool_call.name,

@@ -13,6 +13,7 @@ from dendrite.tool import tool
 from dendrite.types import (
     Finish,
     LLMResponse,
+    Role,
     RunStatus,
     ToolCall,
 )
@@ -38,6 +39,12 @@ async def multiply(a: int, b: int) -> int:
 def sync_add(a: int, b: int) -> int:
     """Add two numbers (sync)."""
     return a + b
+
+
+@tool()
+async def greet(name: str) -> str:
+    """Return a greeting string."""
+    return f"hello {name}"
 
 
 @tool()
@@ -213,6 +220,87 @@ class TestReActLoopToolCalling:
         assert isinstance(result.steps[0].action, ToolCall)
         assert isinstance(result.steps[1].action, ToolCall)
         assert isinstance(result.steps[2].action, Finish)
+
+    async def test_string_tool_result_is_json_encoded(self) -> None:
+        """Tools returning strings must have JSON-encoded payloads."""
+        tc = ToolCall(name="greet", params={"name": "world"}, provider_tool_call_id="t_str")
+        llm = MockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="done"),
+            ]
+        )
+        agent = _make_agent(tools=[greet])
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Say hi",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        # The tool result fed back to the LLM should be valid JSON.
+        # "hello world" must be serialized as '"hello world"', not bare hello world.
+        history_call = llm.call_history[1]  # second LLM call has tool result in messages
+        tool_msg = [m for m in history_call["messages"] if m.role == Role.TOOL][0]
+        assert tool_msg.content == '"hello world"'
+
+    async def test_multiple_tool_calls_in_one_turn(self) -> None:
+        """All tool calls from a single assistant turn are executed and results appended."""
+        tc1 = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="t1")
+        tc2 = ToolCall(name="multiply", params={"a": 3, "b": 4}, provider_tool_call_id="t2")
+        llm = MockLLM(
+            [
+                LLMResponse(text="I'll compute both", tool_calls=[tc1, tc2]),
+                LLMResponse(text="1+2=3, 3*4=12"),
+            ]
+        )
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Add 1+2 and multiply 3*4",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "1+2=3, 3*4=12"
+        assert result.iteration_count == 2
+
+        # Second LLM call should have both tool results in order
+        second_call_msgs = llm.call_history[1]["messages"]
+        tool_msgs = [m for m in second_call_msgs if m.role == Role.TOOL]
+        assert len(tool_msgs) == 2
+        assert tool_msgs[0].name == "add"
+        assert tool_msgs[1].name == "multiply"
+
+    async def test_multiple_tool_calls_preserve_order(self) -> None:
+        """Tool results are appended in the same order as assistant's tool_calls."""
+        tc1 = ToolCall(name="multiply", params={"a": 5, "b": 6}, provider_tool_call_id="t_m")
+        tc2 = ToolCall(name="add", params={"a": 10, "b": 20}, provider_tool_call_id="t_a")
+        llm = MockLLM(
+            [
+                LLMResponse(tool_calls=[tc1, tc2]),
+                LLMResponse(text="done"),
+            ]
+        )
+        agent = _make_agent()
+
+        await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Go",
+        )
+
+        second_call_msgs = llm.call_history[1]["messages"]
+        tool_msgs = [m for m in second_call_msgs if m.role == Role.TOOL]
+        assert tool_msgs[0].name == "multiply"
+        assert tool_msgs[0].call_id == tc1.id
+        assert tool_msgs[1].name == "add"
+        assert tool_msgs[1].call_id == tc2.id
 
     async def test_sync_tool_works(self) -> None:
         """Sync tools are executed via asyncio.to_thread."""

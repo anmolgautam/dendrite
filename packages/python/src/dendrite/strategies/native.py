@@ -68,8 +68,9 @@ class NativeToolCalling(Strategy):
         """
         if response.tool_calls:
             # Native tool calling: provider returned structured tool_use blocks.
-            # For Sprint 1, we handle one tool call at a time.
-            # The loop will handle parallel execution in a future sprint.
+            # AgentStep.action models a single action, so we store the first
+            # tool call there. The full ordered list goes in meta["all_tool_calls"]
+            # for the loop to execute all of them before the next LLM turn.
             tc = response.tool_calls[0]
             return AgentStep(
                 reasoning=response.text,

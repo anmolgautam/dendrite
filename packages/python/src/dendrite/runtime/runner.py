@@ -1,11 +1,12 @@
 """Agent runner — the entry point for executing agents.
 
-Takes an Agent definition and runs it through the loop with a resolved
+Takes an Agent definition and runs it through the loop with an explicit
 provider and strategy. This is the top-level API developers interact with.
 
-Sprint 1: resolves provider from model string, uses NativeToolCalling
-strategy and ReActLoop as defaults. Future sprints add provider registry,
-strategy selection from agent config, and more loop types.
+Sprint 1: caller provides the LLM provider instance, defaults to
+NativeToolCalling strategy and ReActLoop. Future sprints add provider
+registry (model string → provider resolution), strategy selection from
+agent config, and more loop types.
 """
 
 from __future__ import annotations
