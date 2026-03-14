@@ -1,0 +1,188 @@
+"""ReAct loop — think, act, observe, repeat.
+
+The core agent execution loop. Orchestrates the cycle of:
+  1. Strategy builds messages
+  2. Provider calls the LLM
+  3. Strategy parses the response into an AgentStep
+  4. If ToolCall → execute → format result → append → repeat
+  5. If Finish → return RunResult
+  6. If max_iterations → return RunResult with MAX_ITERATIONS
+
+The loop never touches provider-specific APIs or prompt formatting.
+It operates entirely on Dendrite's universal types.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import time
+from typing import TYPE_CHECKING, Any
+
+from dendrite.loops.base import Loop
+from dendrite.tool import get_tool_def
+from dendrite.types import (
+    AgentStep,
+    Finish,
+    Message,
+    Role,
+    RunResult,
+    RunStatus,
+    ToolCall,
+    ToolResult,
+    UsageStats,
+    generate_ulid,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from dendrite.agent import Agent
+    from dendrite.llm.base import LLMProvider
+    from dendrite.strategies.base import Strategy
+
+
+class ReActLoop(Loop):
+    """Think → act → observe → repeat.
+
+    The default loop for most agent tasks. Runs until the strategy returns
+    a Finish action or max_iterations is reached.
+
+    Usage:
+        loop = ReActLoop()
+        result = await loop.run(
+            agent=agent,
+            provider=provider,
+            strategy=strategy,
+            user_input="What is 15 + 27?",
+        )
+    """
+
+    async def run(
+        self,
+        *,
+        agent: Agent,
+        provider: LLMProvider,
+        strategy: Strategy,
+        user_input: str,
+    ) -> RunResult:
+        """Execute the ReAct loop."""
+        run_id = generate_ulid()
+        tool_defs = agent.get_tool_defs()
+        tool_lookup = _build_tool_lookup(agent.tools)
+
+        history: list[Message] = [Message(role=Role.USER, content=user_input)]
+        steps: list[AgentStep] = []
+        total_usage = UsageStats()
+
+        for iteration in range(1, agent.max_iterations + 1):
+            # 1. Build messages via strategy
+            messages, tools = strategy.build_messages(
+                system_prompt=agent.prompt,
+                history=history,
+                tool_defs=tool_defs,
+            )
+
+            # 2. Call the LLM
+            response = await provider.complete(messages, tools=tools)
+
+            # Accumulate usage
+            total_usage.input_tokens += response.usage.input_tokens
+            total_usage.output_tokens += response.usage.output_tokens
+            total_usage.total_tokens += response.usage.total_tokens
+
+            # 3. Parse response into AgentStep
+            step = strategy.parse_response(response)
+            steps.append(step)
+
+            # 4. Check action type
+            if isinstance(step.action, Finish):
+                return RunResult(
+                    run_id=run_id,
+                    status=RunStatus.SUCCESS,
+                    answer=step.action.answer,
+                    steps=steps,
+                    iteration_count=iteration,
+                    usage=total_usage,
+                )
+
+            if isinstance(step.action, ToolCall):
+                # Execute the tool
+                tool_result = await _execute_tool(step.action, tool_lookup)
+
+                # Append assistant message with tool_calls to history
+                assistant_msg = Message(
+                    role=Role.ASSISTANT,
+                    content=response.text or "",
+                    tool_calls=response.tool_calls,
+                )
+                history.append(assistant_msg)
+
+                # Format and append tool result
+                result_msg = strategy.format_tool_result(tool_result)
+                history.append(result_msg)
+
+        # Max iterations reached
+        return RunResult(
+            run_id=run_id,
+            status=RunStatus.MAX_ITERATIONS,
+            steps=steps,
+            iteration_count=agent.max_iterations,
+            usage=total_usage,
+        )
+
+
+def _build_tool_lookup(
+    tools: list[Callable[..., Any]],
+) -> dict[str, Callable[..., Any]]:
+    """Build a name → function lookup from the agent's tool list."""
+    lookup: dict[str, Callable[..., Any]] = {}
+    for fn in tools:
+        td = get_tool_def(fn)
+        lookup[td.name] = fn
+    return lookup
+
+
+async def _execute_tool(
+    tool_call: ToolCall,
+    tool_lookup: dict[str, Callable[..., Any]],
+) -> ToolResult:
+    """Execute a tool function and return a ToolResult."""
+    fn = tool_lookup.get(tool_call.name)
+    if fn is None:
+        return ToolResult(
+            name=tool_call.name,
+            call_id=tool_call.id,
+            payload=json.dumps({"error": f"Unknown tool: {tool_call.name}"}),
+            success=False,
+            error=f"Unknown tool: {tool_call.name}",
+        )
+
+    start = time.monotonic()
+    try:
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**tool_call.params)
+        else:
+            result = await asyncio.to_thread(fn, **tool_call.params)
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        payload = json.dumps(result) if not isinstance(result, str) else result
+
+        return ToolResult(
+            name=tool_call.name,
+            call_id=tool_call.id,
+            payload=payload,
+            success=True,
+            duration_ms=duration_ms,
+        )
+    except Exception as e:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return ToolResult(
+            name=tool_call.name,
+            call_id=tool_call.id,
+            payload=json.dumps({"error": str(e)}),
+            success=False,
+            error=str(e),
+            duration_ms=duration_ms,
+        )
