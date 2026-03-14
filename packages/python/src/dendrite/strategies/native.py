@@ -33,6 +33,12 @@ class NativeToolCalling(Strategy):
     Developer writes zero parsing code — the provider returns structured
     tool_use blocks, this strategy wraps them into AgentSteps.
 
+    Sprint 1 compromise: AgentStep.action models a single action, so when the
+    LLM returns multiple tool calls, the first becomes step.action and the full
+    ordered list is stored in step.meta["all_tool_calls"]. The loop uses this
+    to execute all calls before the next LLM turn. A future sprint may replace
+    this with a typed multi-action representation on AgentStep.
+
     Usage:
         strategy = NativeToolCalling()
         messages, tools = strategy.build_messages(

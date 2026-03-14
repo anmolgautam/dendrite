@@ -141,16 +141,21 @@ class ToolDef:
 
     Created by the @tool decorator. Used by strategies to describe tools
     to the LLM, and by the executor to dispatch tool calls.
+
+    Note: parallel, priority, max_calls_per_run, and timeout_seconds are
+    declared in the type system but not yet enforced by the runtime.
+    Sprint 1 executes all tool calls sequentially in request order.
+    Enforcement is planned for the execution engine in a future sprint.
     """
 
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema for params
     target: ToolTarget = ToolTarget.SERVER
-    parallel: bool = True
-    priority: int = 0
-    max_calls_per_run: int | None = None
-    timeout_seconds: float = 30.0
+    parallel: bool = True  # Declared, not yet enforced
+    priority: int = 0  # Declared, not yet enforced
+    max_calls_per_run: int | None = None  # Declared, not yet enforced
+    timeout_seconds: float = 30.0  # Declared, not yet enforced
 
 
 @dataclass(frozen=True)
