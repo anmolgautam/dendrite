@@ -40,7 +40,7 @@ if __name__ == "__main__":
             api_key=os.environ["ANTHROPIC_API_KEY"],
             model=agent.model,
         )
-        result = await run(agent, provider=provider, input="What is 15 + 27?")
+        result = await run(agent, provider=provider, user_input="What is 15 + 27?")
         print(f"Answer: {result.answer}")
         print(f"Steps: {result.iteration_count}, Tokens: {result.usage.total_tokens}")
 

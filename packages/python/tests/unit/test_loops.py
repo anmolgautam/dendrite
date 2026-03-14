@@ -11,8 +11,11 @@ from dendrite.loops.react import ReActLoop
 from dendrite.strategies.native import NativeToolCalling
 from dendrite.tool import tool
 from dendrite.types import (
+    AgentStep,
+    Clarification,
     Finish,
     LLMResponse,
+    Message,
     Role,
     RunStatus,
     ToolCall,
@@ -51,6 +54,20 @@ async def greet(name: str) -> str:
 async def failing_tool() -> str:
     """A tool that always fails."""
     raise RuntimeError("Something broke")
+
+
+@tool()
+async def return_datetime() -> dict:
+    """Return a datetime object (non-JSON-serializable)."""
+    import datetime
+
+    return {"timestamp": datetime.datetime(2025, 1, 15, 12, 0, 0)}
+
+
+@tool()
+async def return_set() -> dict:
+    """Return a set (non-JSON-serializable)."""
+    return {"items": {1, 2, 3}}
 
 
 # ------------------------------------------------------------------
@@ -459,6 +476,108 @@ class TestReActLoopUsage:
         assert result.usage.input_tokens == 300
         assert result.usage.output_tokens == 80
         assert result.usage.total_tokens == 380
+
+
+# ------------------------------------------------------------------
+# ReActLoop — Clarification action (M4)
+# ------------------------------------------------------------------
+
+
+class TestReActLoopClarification:
+    async def test_clarification_returns_as_answer(self) -> None:
+        """M4: Clarification action is handled by returning the question as answer."""
+        from dendrite.strategies.base import Strategy
+
+        class ClarifyStrategy(Strategy):
+            """Strategy that always returns a Clarification on the first call."""
+
+            def build_messages(self, *, system_prompt, history, tool_defs):
+                return [Message(role=Role.SYSTEM, content=system_prompt), *history], None
+
+            def parse_response(self, response):
+                return AgentStep(
+                    reasoning="I need more info",
+                    action=Clarification(question="Which format do you want?"),
+                )
+
+            def format_tool_result(self, result):
+                return Message(
+                    role=Role.TOOL,
+                    content=result.payload,
+                    name=result.name,
+                    call_id=result.call_id,
+                )
+
+        llm = MockLLM([LLMResponse(text="doesn't matter")])
+        agent = _make_agent()
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=ClarifyStrategy(),
+            user_input="Do something",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "Which format do you want?"
+        assert isinstance(result.steps[0].action, Clarification)
+
+
+# ------------------------------------------------------------------
+# ReActLoop — non-serializable tool results (C2)
+# ------------------------------------------------------------------
+
+
+class TestReActLoopNonSerializableResults:
+    async def test_tool_returning_datetime_doesnt_crash(self) -> None:
+        """C2: Tool returning datetime uses default=str fallback."""
+        tc = ToolCall(
+            name="return_datetime",
+            params={},
+            provider_tool_call_id="t_dt",
+        )
+        llm = MockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="Got the timestamp"),
+            ]
+        )
+        agent = _make_agent(tools=[return_datetime])
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Get time",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "Got the timestamp"
+
+    async def test_tool_returning_set_doesnt_crash(self) -> None:
+        """C2: Tool returning set uses default=str fallback."""
+        tc = ToolCall(
+            name="return_set",
+            params={},
+            provider_tool_call_id="t_set",
+        )
+        llm = MockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="Got the items"),
+            ]
+        )
+        agent = _make_agent(tools=[return_set])
+
+        result = await ReActLoop().run(
+            agent=agent,
+            provider=llm,
+            strategy=NativeToolCalling(),
+            user_input="Get items",
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "Got the items"
 
 
 # Need to import UsageStats for the usage test

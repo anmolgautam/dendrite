@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from dendrite.loops.base import LoopObserver
+
 if TYPE_CHECKING:
     from dendrite.runtime.state import StateStore
     from dendrite.types import LLMResponse, Message, ToolCall, ToolResult
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class PersistenceObserver:
+class PersistenceObserver(LoopObserver):
     """Writes loop events to a StateStore for persistence.
 
     Tracks order_index internally to ensure react_traces are ordered

@@ -75,6 +75,8 @@ class Agent:
             self.prompt = prompt
         if tools is not _UNSET:
             self.tools = list(tools)
+        else:
+            self.tools = list(self.__class__.tools)
         if max_iterations is not _UNSET:
             self.max_iterations = max_iterations
 

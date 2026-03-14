@@ -52,7 +52,12 @@ def run(
     agent_name: str = typer.Option(
         "", "--agent", "-a", help="Agent class/variable name. Auto-detected if omitted."
     ),
-    api_key: str = typer.Option("", "--api-key", "-k", help="LLM API key. Falls back to env var."),
+    api_key: str = typer.Option(
+        "",
+        "--api-key",
+        "-k",
+        help="LLM API key (visible in shell history; prefer ANTHROPIC_API_KEY env var).",
+    ),
 ) -> None:
     """Run an agent from a Python file."""
     # Load the module from the file
@@ -80,7 +85,7 @@ def run(
     # Run the agent
     from dendrite.runtime.runner import run as agent_run
 
-    result = asyncio.run(agent_run(agent, provider=provider, input=input))
+    result = asyncio.run(agent_run(agent, provider=provider, user_input=input))
 
     # Print results
     for i, step in enumerate(result.steps, 1):

@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from dendrite.types import UsageStats, generate_ulid
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from dendrite.db.models import AgentRun
 
 
 @dataclass
@@ -42,8 +46,8 @@ class RunRecord:
     total_output_tokens: int = 0
     total_cost_usd: float | None = None
     meta: dict[str, Any] | None = None
-    created_at: Any = None
-    updated_at: Any = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass
@@ -55,7 +59,7 @@ class TraceRecord:
     content: str
     order_index: int
     meta: dict[str, Any] | None = None
-    created_at: Any = None
+    created_at: datetime | None = None
 
 
 @dataclass
@@ -73,7 +77,7 @@ class ToolCallReadRecord:
     duration_ms: int | None
     iteration_index: int | None
     error_message: str | None
-    created_at: Any = None
+    created_at: datetime | None = None
 
 
 class StateStore(Protocol):
@@ -432,7 +436,7 @@ class SQLAlchemyStateStore:
             return [_run_to_record(r) for r in rows]
 
 
-def _run_to_record(row: Any) -> RunRecord:
+def _run_to_record(row: AgentRun) -> RunRecord:
     """Convert an AgentRun ORM object to a RunRecord dataclass."""
     answer = None
     if row.output_data and isinstance(row.output_data, dict):

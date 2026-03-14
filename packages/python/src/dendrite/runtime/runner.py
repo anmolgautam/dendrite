@@ -39,7 +39,7 @@ async def run(
     agent: Agent,
     *,
     provider: LLMProvider,
-    input: str,
+    user_input: str,
     strategy: Strategy | None = None,
     loop: Loop | None = None,
     state_store: StateStore | None = None,
@@ -56,7 +56,7 @@ async def run(
     Args:
         agent: Agent definition (model, tools, prompt, limits).
         provider: LLM provider to use for this run.
-        input: The user's input to process.
+        user_input: The user's input to process.
         strategy: Communication strategy. Defaults to NativeToolCalling.
         loop: Execution loop. Defaults to ReActLoop.
         state_store: Optional persistence backend. If provided, the run
@@ -83,7 +83,7 @@ async def run(
             prompt="You are a calculator.",
         )
         provider = AnthropicProvider(api_key="sk-...", model="claude-sonnet-4-6")
-        result = await run(agent, provider=provider, input="What is 15 + 27?")
+        result = await run(agent, provider=provider, user_input="What is 15 + 27?")
         print(result.answer)
     """
     resolved_strategy = strategy or NativeToolCalling()
@@ -98,7 +98,7 @@ async def run(
         await state_store.create_run(
             run_id,
             agent.name,
-            input_data={"input": input},
+            input_data={"input": user_input},
             model=agent.model,
             strategy=type(resolved_strategy).__name__,
             tenant_id=tenant_id,
@@ -120,7 +120,7 @@ async def run(
             agent=agent,
             provider=provider,
             strategy=resolved_strategy,
-            user_input=input,
+            user_input=user_input,
             run_id=run_id,
             observer=observer,
         )

@@ -352,6 +352,22 @@ class TestListRuns:
         assert len(runs) == 1
         assert runs[0].id == "run_s1"
 
+    async def test_combined_tenant_and_status_filter(self, store) -> None:
+        """T6: Combined filters narrow results correctly."""
+        await store.create_run("r1", "Agent", tenant_id="t_a")
+        await store.create_run("r2", "Agent", tenant_id="t_a")
+        await store.create_run("r3", "Agent", tenant_id="t_b")
+        await store.create_run("r4", "Agent", tenant_id="t_a")
+
+        await store.finalize_run("r1", status="success")
+        await store.finalize_run("r2", status="error")
+        await store.finalize_run("r3", status="success")
+        # r4 stays "running"
+
+        runs = await store.list_runs(tenant_id="t_a", status="success")
+        assert len(runs) == 1
+        assert runs[0].id == "r1"
+
     async def test_empty_list(self, store) -> None:
         assert await store.list_runs() == []
 

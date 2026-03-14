@@ -1,5 +1,7 @@
 """Tests for @tool decorator and schema generation."""
 
+from typing import Optional
+
 import pytest
 
 from dendrite.tool import get_tool_def, is_tool, tool
@@ -205,3 +207,24 @@ class TestSchemaGeneration:
         assert schema["type"] == "object"
         assert schema["properties"] == {}
         assert schema["required"] == []
+
+    def test_typing_optional_not_required(self) -> None:
+        """M1: typing.Optional[X] must also be detected as optional."""
+
+        @tool()
+        async def fn(x: str, y: Optional[str] = None) -> str:  # noqa: UP045
+            """Test."""
+            return x
+
+        schema = get_tool_def(fn).parameters
+        assert "x" in schema["required"]
+        assert "y" not in schema["required"]
+
+    def test_invalid_target_raises(self) -> None:
+        """M8: Invalid target string raises ValueError."""
+        with pytest.raises(ValueError, match="invalid"):
+
+            @tool(target="invalid")
+            async def fn() -> str:
+                """Test."""
+                return ""

@@ -8,8 +8,8 @@ Postgres users set DENDRITE_DATABASE_URL and use Alembic migrations.
 
 from __future__ import annotations
 
-import asyncio
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -23,7 +23,7 @@ from dendrite.db.models import Base
 
 _engine: AsyncEngine | None = None
 _session_factory: sessionmaker | None = None  # type: ignore[type-arg]
-_engine_lock = asyncio.Lock()
+_engine_lock = threading.Lock()
 
 DEFAULT_SQLITE_URL = "sqlite+aiosqlite:///./dendrite.db"
 
@@ -46,7 +46,7 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
     if _engine is not None:
         return _engine
 
-    async with _engine_lock:
+    with _engine_lock:
         # Double-check after acquiring lock
         if _engine is not None:
             return _engine
@@ -68,21 +68,23 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
             _engine, class_=AsyncSession, expire_on_commit=False
         )
 
-        # Auto-create tables for SQLite (zero-config promise)
-        if resolved_url.startswith("sqlite"):
-            async with _engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+    # Auto-create tables for SQLite (zero-config promise)
+    # Outside the lock — idempotent and safe for concurrent calls
+    if resolved_url.startswith("sqlite"):
+        async with _engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
-        return _engine
+    return _engine
 
 
 async def reset_engine() -> None:
     """Dispose the current engine and session factory. Used in tests for cleanup."""
     global _engine, _session_factory  # noqa: PLW0603
-    if _engine is not None:
-        await _engine.dispose()
-        _engine = None
-        _session_factory = None
+    with _engine_lock:
+        if _engine is not None:
+            await _engine.dispose()
+            _engine = None
+            _session_factory = None
 
 
 @asynccontextmanager

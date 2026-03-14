@@ -88,6 +88,33 @@ class TestAgentSubclass:
         assert a.tools == [add]
         assert b.tools == [read_range]
 
+    def test_subclass_instances_get_separate_tool_lists(self):
+        """C1: Two instances of the same subclass must have independent tool lists."""
+
+        class SharedAgent(Agent):
+            model = "claude-sonnet-4-6"
+            prompt = "Shared."
+            tools = [add]
+
+        a1 = SharedAgent()
+        a2 = SharedAgent()
+        assert a1.tools is not a2.tools
+        assert a1.tools == a2.tools  # same contents, different lists
+
+    def test_mutating_one_instance_tools_doesnt_affect_another(self):
+        """C1: Mutating one instance's tools must not cross-contaminate."""
+
+        class MutableAgent(Agent):
+            model = "claude-sonnet-4-6"
+            prompt = "Test."
+            tools = [add]
+
+        a1 = MutableAgent()
+        a2 = MutableAgent()
+        a1.tools.append(read_range)
+        assert len(a1.tools) == 2
+        assert len(a2.tools) == 1
+
 
 class TestAgentConstructor:
     """Constructor style: Agent(model=..., tools=...)."""

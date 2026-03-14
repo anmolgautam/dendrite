@@ -89,7 +89,7 @@ if __name__ == "__main__":
         result = await run(
             agent,
             provider=provider,
-            input="What's my portfolio worth? I have 10 AAPL, 5 GOOGL, and 20 MSFT.",
+            user_input="What's my portfolio worth? I have 10 AAPL, 5 GOOGL, and 20 MSFT.",
             state_store=store,
         )
 

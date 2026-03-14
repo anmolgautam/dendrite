@@ -30,6 +30,7 @@ from dendrite.loops.base import Loop
 from dendrite.tool import get_tool_def
 from dendrite.types import (
     AgentStep,
+    Clarification,
     Finish,
     Message,
     Role,
@@ -155,6 +156,16 @@ class ReActLoop(Loop):
                     usage=total_usage,
                 )
 
+            if isinstance(step.action, Clarification):
+                return RunResult(
+                    run_id=resolved_run_id,
+                    status=RunStatus.SUCCESS,
+                    answer=step.action.question,
+                    steps=steps,
+                    iteration_count=iteration,
+                    usage=total_usage,
+                )
+
             if isinstance(step.action, ToolCall):
                 # Append assistant message with all tool_calls to history
                 assistant_msg = Message(
@@ -221,7 +232,10 @@ async def _execute_tool(
             result = await asyncio.to_thread(fn, **tool_call.params)
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        payload = json.dumps(result)
+        try:
+            payload = json.dumps(result, default=str)
+        except (TypeError, ValueError):
+            payload = json.dumps(str(result))
 
         return ToolResult(
             name=tool_call.name,

@@ -34,7 +34,7 @@ class TestRun:
         llm = MockLLM([LLMResponse(text="Hello!")])
         agent = Agent(model="mock", prompt="Be friendly.", tools=[add])
 
-        result = await run(agent, provider=llm, input="Hi")
+        result = await run(agent, provider=llm, user_input="Hi")
 
         assert result.status == RunStatus.SUCCESS
         assert result.answer == "Hello!"
@@ -50,7 +50,7 @@ class TestRun:
         )
         agent = Agent(model="mock", prompt="Calculate.", tools=[add])
 
-        result = await run(agent, provider=llm, input="3+4?")
+        result = await run(agent, provider=llm, user_input="3+4?")
 
         assert result.status == RunStatus.SUCCESS
         assert result.answer == "7"
@@ -61,7 +61,7 @@ class TestRun:
         llm = MockLLM([LLMResponse(text="ok")])
         agent = Agent(model="mock", prompt="Test.", tools=[add])
 
-        result = await run(agent, provider=llm, input="Hi")
+        result = await run(agent, provider=llm, user_input="Hi")
 
         assert result.status == RunStatus.SUCCESS
 
@@ -73,7 +73,7 @@ class TestRun:
         result = await run(
             agent,
             provider=llm,
-            input="Hi",
+            user_input="Hi",
             strategy=NativeToolCalling(),
         )
 
@@ -87,7 +87,7 @@ class TestRun:
         result = await run(
             agent,
             provider=llm,
-            input="Hi",
+            user_input="Hi",
             loop=ReActLoop(),
         )
 
@@ -104,7 +104,7 @@ class TestRun:
         )
         agent = Agent(model="mock", prompt="Loop.", tools=[add], max_iterations=2)
 
-        result = await run(agent, provider=llm, input="Go")
+        result = await run(agent, provider=llm, user_input="Go")
 
         assert result.status == RunStatus.MAX_ITERATIONS
 

@@ -8,6 +8,8 @@ callable as normal. Schema is auto-generated from type hints.
 from __future__ import annotations
 
 import inspect
+import typing
+import warnings
 from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
 
 if TYPE_CHECKING:
@@ -28,7 +30,7 @@ _TYPE_MAP: dict[type, str] = {
 
 
 def tool(
-    target: str = "server",
+    target: ToolTarget | str = ToolTarget.SERVER,
     parallel: bool = True,
     priority: int = 0,
     max_calls_per_run: int | None = None,
@@ -129,20 +131,29 @@ def _type_to_schema(hint: type) -> dict[str, Any]:
     if json_type:
         return {"type": json_type}
 
+    warnings.warn(
+        f"Type {hint!r} is not recognized by Dendrite schema generation; "
+        f"defaulting to {{'type': 'string'}}.",
+        stacklevel=2,
+    )
     return {"type": "string"}
 
 
 def _is_optional(hint: type) -> bool:
     """Check if a type hint is Optional (i.e., X | None or Optional[X])."""
     origin = get_origin(hint)
-    if origin is not type(int | str):
+    if origin is not type(int | str) and origin is not typing.Union:
         return False
     args = get_args(hint)
     return type(None) in args
 
 
 def _unwrap_optional(hint: type) -> type:
-    """Extract the inner type from Optional[X] / X | None."""
+    """Extract the inner type from Optional[X] / X | None.
+
+    Note: For multi-type unions like ``str | int | None``, only the first
+    non-None type is used. Full JSON Schema ``oneOf`` support is deferred.
+    """
     args = get_args(hint)
     non_none = [a for a in args if a is not type(None)]
     return non_none[0] if non_none else str
