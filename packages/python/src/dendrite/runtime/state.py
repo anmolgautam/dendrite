@@ -174,7 +174,9 @@ class SQLAlchemyStateStore:
         from sqlalchemy.orm import sessionmaker
 
         self._engine = engine
-        self._session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        self._session_factory = sessionmaker(  # type: ignore[call-overload]
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
 
     async def create_run(
         self,

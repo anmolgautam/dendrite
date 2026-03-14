@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from dendrite.db.models import Base
 
 _engine: AsyncEngine | None = None
-_session_factory: sessionmaker | None = None
+_session_factory: sessionmaker | None = None  # type: ignore[type-arg]
 _engine_lock = asyncio.Lock()
 
 DEFAULT_SQLITE_URL = "sqlite+aiosqlite:///./dendrite.db"
@@ -64,7 +64,9 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
             connect_args=connect_args,
         )
 
-        _session_factory = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+        _session_factory = sessionmaker(  # type: ignore[call-overload]
+            _engine, class_=AsyncSession, expire_on_commit=False
+        )
 
         # Auto-create tables for SQLite (zero-config promise)
         if resolved_url.startswith("sqlite"):
@@ -98,7 +100,9 @@ async def get_session(engine: AsyncEngine | None = None) -> AsyncGenerator[Async
     if engine is None and _session_factory is not None:
         factory = _session_factory
     else:
-        factory = sessionmaker(resolved_engine, class_=AsyncSession, expire_on_commit=False)
+        factory = sessionmaker(  # type: ignore[call-overload]
+            resolved_engine, class_=AsyncSession, expire_on_commit=False
+        )
     async with factory() as session:
         try:
             yield session
