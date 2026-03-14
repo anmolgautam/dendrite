@@ -19,6 +19,20 @@ app = typer.Typer(
 console = Console()
 
 
+def _register_subcommands() -> None:
+    """Register subcommand groups. Called after app is created."""
+    from dendrite.cli.db import app as db_app
+    from dendrite.cli.runs import app as runs_app
+    from dendrite.cli.traces import app as traces_app
+
+    app.add_typer(db_app)
+    app.add_typer(runs_app)
+    app.add_typer(traces_app)
+
+
+_register_subcommands()
+
+
 @app.callback(invoke_without_command=True)
 def main(
     version: bool = typer.Option(False, "--version", "-v", help="Show version and exit."),

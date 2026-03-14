@@ -21,6 +21,7 @@ import datetime  # noqa: TC003 — needed at runtime for SQLAlchemy Mapped[] res
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -31,7 +32,6 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
