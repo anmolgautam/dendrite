@@ -33,6 +33,7 @@ from dendrite.types import (
     Clarification,
     Finish,
     Message,
+    PauseState,
     Role,
     RunResult,
     RunStatus,
@@ -229,12 +230,19 @@ class ReActLoop(Loop):
                 history.append(assistant_msg)
                 await _notify_message(observer, assistant_msg, iteration, observer_warnings)
 
-                # Execute all tool calls from this turn and append results
-                # in the same order the assistant requested them.
-                # step.meta["all_tool_calls"] contains the full list;
-                # step.action is only the first (AgentStep models one action).
+                # Split tool calls into server (execute now) vs non-server (pause)
                 all_calls: list[ToolCall] = step.meta.get("all_tool_calls", [step.action])
+                server_calls: list[ToolCall] = []
+                pending_calls: list[ToolCall] = []
                 for tc in all_calls:
+                    target = target_lookup.get(tc.name, ToolTarget.SERVER)
+                    if target == ToolTarget.SERVER:
+                        server_calls.append(tc)
+                    else:
+                        pending_calls.append(tc)
+
+                # Execute server tools immediately
+                for tc in server_calls:
                     tool_result = await _execute_tool(
                         tc, tool_lookup, target_lookup, timeout_lookup
                     )
@@ -242,6 +250,42 @@ class ReActLoop(Loop):
                     result_msg = strategy.format_tool_result(tool_result)
                     history.append(result_msg)
                     await _notify_message(observer, result_msg, iteration, observer_warnings)
+
+                # If non-server tools remain, pause the loop
+                if pending_calls:
+                    # Approximate trace offset from history length. This can
+                    # diverge from the actual DB trace count if observer
+                    # notifications were swallowed (see _notify_message).
+                    # Group 2's resume() must load the real max order_index
+                    # from the DB, not trust this value blindly.
+                    trace_offset = len(history)
+
+                    pause_state = PauseState(
+                        agent_name=agent.name,
+                        pending_tool_calls=pending_calls,
+                        history=list(history),
+                        steps=list(steps),
+                        iteration=iteration,
+                        trace_order_offset=trace_offset,
+                        usage=UsageStats(
+                            input_tokens=total_usage.input_tokens,
+                            output_tokens=total_usage.output_tokens,
+                            total_tokens=total_usage.total_tokens,
+                            cost_usd=total_usage.cost_usd,
+                        ),
+                    )
+
+                    pause_meta: dict[str, Any] = {"pause_state": pause_state}
+                    if observer_warnings:
+                        pause_meta["observer_warnings"] = observer_warnings
+                    return RunResult(
+                        run_id=resolved_run_id,
+                        status=RunStatus.WAITING_CLIENT_TOOL,
+                        steps=steps,
+                        iteration_count=iteration,
+                        usage=total_usage,
+                        meta=pause_meta,
+                    )
 
         # Max iterations reached
         meta = {}
@@ -286,25 +330,11 @@ async def _execute_tool(
     target_lookup: dict[str, ToolTarget] | None = None,
     timeout_lookup: dict[str, float] | None = None,
 ) -> ToolResult:
-    """Execute a tool function and return a ToolResult."""
-    # Guard: refuse to execute non-server tools locally
-    if target_lookup is not None:
-        target = target_lookup.get(tool_call.name)
-        if target is not None and target != ToolTarget.SERVER:
-            return ToolResult(
-                name=tool_call.name,
-                call_id=tool_call.id,
-                payload=json.dumps(
-                    {
-                        "error": f"Tool '{tool_call.name}' has target={target.value!r} "
-                        f"and cannot be executed server-side. "
-                        f"Client/human/agent tool execution is not yet implemented."
-                    }
-                ),
-                success=False,
-                error=f"Non-server tool target: {target.value}",
-            )
+    """Execute a server tool function and return a ToolResult.
 
+    Non-server tools are filtered out by the loop before reaching this
+    function. They trigger a pause instead of execution.
+    """
     fn = tool_lookup.get(tool_call.name)
     if fn is None:
         return ToolResult(

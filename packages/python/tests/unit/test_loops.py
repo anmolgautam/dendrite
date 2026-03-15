@@ -586,8 +586,8 @@ class TestReActLoopNonSerializableResults:
 
 
 class TestReActLoopToolTargetGuard:
-    async def test_client_tool_returns_error_not_executed(self) -> None:
-        """H2: Tools with non-server targets must not be executed locally."""
+    async def test_client_tool_pauses_loop(self) -> None:
+        """Sprint 3: Non-server tools pause the loop instead of erroring."""
 
         @tool(target="client")
         async def read_range(sheet: str) -> str:
@@ -599,12 +599,7 @@ class TestReActLoopToolTargetGuard:
             params={"sheet": "Sheet1"},
             provider_tool_call_id="t_client",
         )
-        llm = MockLLM(
-            [
-                LLMResponse(tool_calls=[tc]),
-                LLMResponse(text="Got an error about client tool"),
-            ]
-        )
+        llm = MockLLM([LLMResponse(tool_calls=[tc])])
         agent = _make_agent(tools=[read_range])
 
         result = await ReActLoop().run(
@@ -614,12 +609,12 @@ class TestReActLoopToolTargetGuard:
             user_input="Read sheet",
         )
 
-        assert result.status == RunStatus.SUCCESS
-        # The tool result fed back should contain the error
-        second_call_msgs = llm.call_history[1]["messages"]
-        tool_msgs = [m for m in second_call_msgs if m.role == Role.TOOL]
-        assert len(tool_msgs) == 1
-        assert "cannot be executed server-side" in tool_msgs[0].content
+        assert result.status == RunStatus.WAITING_CLIENT_TOOL
+        pause_state = result.meta["pause_state"]
+        assert len(pause_state.pending_tool_calls) == 1
+        assert pause_state.pending_tool_calls[0].name == "read_range"
+        # Tool should NOT have been executed
+        assert llm.calls_made == 1
 
 
 # ------------------------------------------------------------------
