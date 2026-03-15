@@ -27,6 +27,7 @@ class MockStateStore:
     traces: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usages: list[dict[str, Any]] = field(default_factory=list)
+    _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     async def save_trace(
         self, run_id: str, role: str, content: str, *, order_index: int, meta: Any = None
@@ -46,6 +47,29 @@ class MockStateStore:
 
     async def save_usage(self, run_id: str, **kwargs: Any) -> None:
         self.usages.append({"run_id": run_id, **kwargs})
+
+    async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
+        self._events.setdefault(run_id, []).append(kwargs)
+
+    async def get_run_events(self, run_id: str) -> list[Any]:
+        @dataclass
+        class _Event:
+            sequence_index: int
+            event_type: str = ""
+            iteration_index: int = 0
+            correlation_id: str | None = None
+            data: dict[str, Any] | None = None
+
+        return [
+            _Event(
+                sequence_index=e.get("sequence_index", 0),
+                event_type=e.get("event_type", ""),
+                iteration_index=e.get("iteration_index", 0),
+                correlation_id=e.get("correlation_id"),
+                data=e.get("data"),
+            )
+            for e in self._events.get(run_id, [])
+        ]
 
 
 # ------------------------------------------------------------------

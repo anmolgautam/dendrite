@@ -37,6 +37,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class EventSequencer:
+    """Monotonic sequence counter for run_events within a single run.
+
+    Shared between the runner (run-level events) and the PersistenceObserver
+    (loop-level events) to guarantee a globally unique, ordered sequence_index
+    per run — including across pause/resume boundaries.
+
+    On resume, initialize with the max existing sequence_index from the DB.
+    """
+
+    def __init__(self, initial: int = 0) -> None:
+        self._seq = initial
+
+    def next(self) -> int:
+        seq = self._seq
+        self._seq += 1
+        return seq
+
+    @property
+    def current(self) -> int:
+        return self._seq
+
+
+async def _emit_event(
+    state_store: StateStore | None,
+    run_id: str,
+    event_type: str,
+    sequencer: EventSequencer | None = None,
+    data: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Record a durable run-level event. Failures are logged, never fatal."""
+    if state_store is None:
+        return
+    seq = sequencer.next() if sequencer else 0
+    try:
+        await state_store.save_run_event(
+            run_id,
+            event_type=event_type,
+            sequence_index=seq,
+            correlation_id=correlation_id,
+            data=data,
+        )
+    except Exception:
+        logger.warning("Failed to record event %s for run %s", event_type, run_id, exc_info=True)
+
+
 async def run(
     agent: Agent,
     *,
@@ -98,6 +145,8 @@ async def run(
     # Runner owns run_id — single source of truth
     run_id = generate_ulid()
     observer = None
+    # Shared sequence counter for run_events — monotonic across runner + observer
+    sequencer = EventSequencer()
 
     if state_store is not None:
         # Create the run record before the loop starts
@@ -113,7 +162,7 @@ async def run(
             meta=metadata,
         )
 
-        # Create persistence observer
+        # Create persistence observer with shared sequencer
         from dendrite.runtime.observer import PersistenceObserver
         from dendrite.tool import get_tool_def
 
@@ -128,7 +177,10 @@ async def run(
             provider_name=type(provider).__name__,
             target_lookup=target_lookup,
             redact=redact,
+            event_sequencer=sequencer,
         )
+
+    await _emit_event(state_store, run_id, "run.started", sequencer, {"agent_name": agent.name})
 
     try:
         result = await resolved_loop.run(
@@ -150,13 +202,30 @@ async def run(
                     pause_data=pause_state.to_dict(),
                     iteration_count=result.iteration_count,
                 )
+                await _emit_event(
+                    state_store,
+                    run_id,
+                    "run.paused",
+                    sequencer,
+                    {
+                        "status": result.status.value,
+                        "pending_tool_calls": [
+                            {
+                                "id": tc.id,
+                                "name": tc.name,
+                                "target": pause_state.pending_targets.get(tc.id),
+                            }
+                            for tc in pause_state.pending_tool_calls
+                        ],
+                    },
+                )
             else:
                 # Finalize with success or max_iterations.
                 # Conditional: only if still running (prevents cancel race).
                 redacted_answer = (
                     redact(result.answer) if redact and result.answer else result.answer
                 )
-                await state_store.finalize_run(
+                finalize_won = await state_store.finalize_run(
                     run_id,
                     status=result.status.value,
                     answer=redacted_answer,
@@ -164,6 +233,16 @@ async def run(
                     total_usage=result.usage,
                     expected_current_status="running",
                 )
+                # Only the CAS winner emits the terminal event — prevents
+                # duplicate run.completed when cancel races with finish.
+                if finalize_won:
+                    await _emit_event(
+                        state_store,
+                        run_id,
+                        "run.completed",
+                        sequencer,
+                        {"status": result.status.value},
+                    )
 
         return result
 
@@ -171,9 +250,10 @@ async def run(
         # Persist ERROR status before re-raising.
         # Conditional: only if still running (prevents cancel race).
         if state_store is not None:
+            error_won = False
             try:
                 redacted_err = redact(str(exc)) if redact else str(exc)
-                await state_store.finalize_run(
+                error_won = await state_store.finalize_run(
                     run_id,
                     status=RunStatus.ERROR.value,
                     error=redacted_err,
@@ -182,6 +262,11 @@ async def run(
                 )
             except Exception:
                 logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)
+            # Only the CAS winner emits the error event
+            if error_won:
+                await _emit_event(
+                    state_store, run_id, "run.error", sequencer, {"error": str(exc)[:500]}
+                )
         raise
 
 
@@ -322,7 +407,22 @@ async def _resume_core(
             f"cannot resume. It may have been claimed by another caller."
         )
 
-    # 4. Build resume history
+    # 4. Initialize sequencer from DB max (continues across pause boundaries)
+    existing_events = await state_store.get_run_events(run_id)
+    max_seq = max((e.sequence_index for e in existing_events), default=-1)
+    sequencer = EventSequencer(initial=max_seq + 1)
+
+    # 5. Record resume event with enriched payload for dashboard
+    resume_data: dict[str, Any] = {"resumed_from": expected_status}
+    if tool_results is not None:
+        resume_data["submitted_results"] = [
+            {"call_id": tr.call_id, "name": tr.name, "success": tr.success} for tr in tool_results
+        ]
+    elif user_input is not None:
+        resume_data["user_input"] = redact(user_input) if redact else user_input
+    await _emit_event(state_store, run_id, "run.resumed", sequencer, resume_data)
+
+    # 6. Build resume history
     history = list(pause_state.history)
 
     if tool_results is not None:
@@ -340,11 +440,11 @@ async def _resume_core(
         # Append clarification response as USER message
         history.append(Message(role=Role.USER, content=user_input))
 
-    # 5. Load real trace order offset from DB (not the approximate one in pause_state)
+    # 7. Load real trace order offset from DB (not the approximate one in pause_state)
     traces = await state_store.get_traces(run_id)
     trace_order_offset = max((t.order_index for t in traces), default=-1) + 1
 
-    # 6. Create observer for resumed run
+    # 8. Create observer for resumed run with shared sequencer
     target_lookup = {}
     for fn in agent.tools:
         td = get_tool_def(fn)
@@ -357,6 +457,7 @@ async def _resume_core(
         target_lookup=target_lookup,
         redact=redact,
         initial_order_index=trace_order_offset,
+        event_sequencer=sequencer,
     )
 
     # Compose with extra observer (e.g. TransportObserver for SSE)
@@ -404,6 +505,23 @@ async def _resume_core(
                 pause_data=new_pause.to_dict(),
                 iteration_count=result.iteration_count,
             )
+            await _emit_event(
+                state_store,
+                run_id,
+                "run.paused",
+                sequencer,
+                {
+                    "status": result.status.value,
+                    "pending_tool_calls": [
+                        {
+                            "id": tc.id,
+                            "name": tc.name,
+                            "target": new_pause.pending_targets.get(tc.id),
+                        }
+                        for tc in new_pause.pending_tool_calls
+                    ],
+                },
+            )
         else:
             redacted_answer = redact(result.answer) if redact and result.answer else result.answer
             finalize_won = await state_store.finalize_run(
@@ -416,6 +534,10 @@ async def _resume_core(
             )
             # Surface CAS result so callers (server) know if they own the terminal event
             result.meta["_finalize_won"] = finalize_won
+            if finalize_won:
+                await _emit_event(
+                    state_store, run_id, "run.completed", sequencer, {"status": result.status.value}
+                )
 
         return result
 
@@ -432,4 +554,7 @@ async def _resume_core(
                 )
             except Exception:
                 logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)
+            await _emit_event(
+                state_store, run_id, "run.error", sequencer, {"error": str(exc)[:500]}
+            )
         raise

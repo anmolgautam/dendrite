@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from dendrite.db.models import AgentRun, Base, ReactTrace, TokenUsage, ToolCallRecord
+from dendrite.db.models import AgentRun, Base, ReactTrace, RunEvent, TokenUsage, ToolCallRecord
 from dendrite.db.session import get_engine, reset_engine
 from dendrite.runtime.state import SQLAlchemyStateStore
 from dendrite.types import UsageStats
@@ -602,3 +602,126 @@ class TestPauseResume:
         record = await store.get_run("run_fc")
         assert record is not None
         assert record.status == "success"
+
+
+# ------------------------------------------------------------------
+# Run Events (Dashboard Phase 0)
+# ------------------------------------------------------------------
+
+
+class TestRunEvents:
+    async def test_save_and_get_events(self, store) -> None:
+        """Events are saved and retrieved in sequence_index order."""
+        await store.create_run("run_ev", "Agent")
+
+        await store.save_run_event(
+            "run_ev", event_type="run.started", sequence_index=0, data={"agent": "A"}
+        )
+        await store.save_run_event(
+            "run_ev",
+            event_type="llm.completed",
+            sequence_index=1,
+            iteration_index=1,
+            data={"tokens": 500},
+        )
+        await store.save_run_event(
+            "run_ev",
+            event_type="run.completed",
+            sequence_index=2,
+            data={"status": "success"},
+        )
+
+        events = await store.get_run_events("run_ev")
+        assert len(events) == 3
+        assert events[0].event_type == "run.started"
+        assert events[0].sequence_index == 0
+        assert events[1].event_type == "llm.completed"
+        assert events[1].iteration_index == 1
+        assert events[1].data == {"tokens": 500}
+        assert events[2].event_type == "run.completed"
+
+    async def test_events_have_timestamps(self, store) -> None:
+        """Each event has a created_at timestamp."""
+        await store.create_run("run_ts", "Agent")
+        await store.save_run_event("run_ts", event_type="run.started")
+
+        events = await store.get_run_events("run_ts")
+        assert len(events) == 1
+        assert events[0].created_at is not None
+
+    async def test_correlation_id_links_related_events(self, store) -> None:
+        """correlation_id links tool.completed back to the tool_call_id."""
+        await store.create_run("run_corr", "Agent")
+
+        await store.save_run_event(
+            "run_corr",
+            event_type="tool.completed",
+            sequence_index=0,
+            iteration_index=1,
+            correlation_id="tc_abc123",
+            data={"tool_name": "lookup", "success": True},
+        )
+
+        events = await store.get_run_events("run_corr")
+        assert len(events) == 1
+        assert events[0].correlation_id == "tc_abc123"
+
+    async def test_pause_resume_events_give_exact_timing(self, store) -> None:
+        """Pause and resume events provide durable timestamps for the dashboard."""
+        await store.create_run("run_pr_ev", "Agent")
+
+        await store.save_run_event(
+            "run_pr_ev",
+            event_type="run.paused",
+            sequence_index=0,
+            data={"pending_tool_calls": [{"name": "read_excel"}]},
+        )
+        await store.save_run_event(
+            "run_pr_ev",
+            event_type="run.resumed",
+            sequence_index=1,
+            data={"resumed_from": "waiting_client_tool"},
+        )
+
+        events = await store.get_run_events("run_pr_ev")
+        assert len(events) == 2
+        pause_event = events[0]
+        resume_event = events[1]
+
+        assert pause_event.event_type == "run.paused"
+        assert resume_event.event_type == "run.resumed"
+        assert pause_event.created_at is not None
+        assert resume_event.created_at is not None
+
+    async def test_sequence_index_determines_order(self, store) -> None:
+        """Events are returned by sequence_index, not insertion order."""
+        await store.create_run("run_seq", "Agent")
+
+        # Insert out of order
+        await store.save_run_event("run_seq", event_type="second", sequence_index=1)
+        await store.save_run_event("run_seq", event_type="first", sequence_index=0)
+
+        events = await store.get_run_events("run_seq")
+        assert events[0].event_type == "first"
+        assert events[1].event_type == "second"
+
+    async def test_events_empty_for_nonexistent_run(self, store) -> None:
+        events = await store.get_run_events("nonexistent")
+        assert events == []
+
+    async def test_delete_run_cascades_to_events(self, store, session_factory) -> None:
+        """Events are deleted when the parent run is deleted."""
+        await store.create_run("run_cas_ev", "Agent")
+        await store.save_run_event("run_cas_ev", event_type="run.started")
+        await store.save_run_event("run_cas_ev", event_type="run.completed", sequence_index=1)
+
+        async with session_factory() as session:
+            from sqlalchemy import delete, select
+
+            await session.execute(delete(AgentRun).where(AgentRun.id == "run_cas_ev"))
+            await session.commit()
+
+            result = await session.execute(
+                select(RunEvent).where(RunEvent.agent_run_id == "run_cas_ev")
+            )
+            assert result.scalars().all() == []

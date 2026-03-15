@@ -80,6 +80,19 @@ class ToolCallReadRecord:
     created_at: datetime | None = None
 
 
+@dataclass
+class RunEventRecord:
+    """Lightweight read model for a persisted run event."""
+
+    id: str
+    event_type: str
+    sequence_index: int
+    iteration_index: int
+    correlation_id: str | None = None
+    data: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
 class StateStore(Protocol):
     """Persistence interface for agent runs.
 
@@ -170,6 +183,19 @@ class StateStore(Protocol):
     async def get_traces(self, run_id: str) -> list[TraceRecord]: ...
 
     async def get_tool_calls(self, run_id: str) -> list[ToolCallReadRecord]: ...
+
+    async def save_run_event(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        sequence_index: int = 0,
+        iteration_index: int = 0,
+        correlation_id: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def get_run_events(self, run_id: str) -> list[RunEventRecord]: ...
 
     async def list_runs(
         self,
@@ -505,6 +531,57 @@ class SQLAlchemyStateStore:
                     duration_ms=r.duration_ms,
                     iteration_index=r.iteration_index,
                     error_message=r.error_message,
+                    created_at=r.created_at,
+                )
+                for r in rows
+            ]
+
+    async def save_run_event(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        sequence_index: int = 0,
+        iteration_index: int = 0,
+        correlation_id: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        from dendrite.db.models import RunEvent
+
+        async with self._session_factory() as session:
+            record = RunEvent(
+                id=generate_ulid(),
+                agent_run_id=run_id,
+                event_type=event_type,
+                sequence_index=sequence_index,
+                iteration_index=iteration_index,
+                correlation_id=correlation_id,
+                data=data,
+            )
+            session.add(record)
+            await session.commit()
+
+    async def get_run_events(self, run_id: str) -> list[RunEventRecord]:
+        from sqlalchemy import select
+
+        from dendrite.db.models import RunEvent
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(RunEvent)
+                .where(RunEvent.agent_run_id == run_id)
+                .order_by(RunEvent.sequence_index)
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                RunEventRecord(
+                    id=r.id,
+                    event_type=r.event_type,
+                    sequence_index=r.sequence_index,
+                    iteration_index=r.iteration_index,
+                    correlation_id=r.correlation_id,
+                    data=r.data,
                     created_at=r.created_at,
                 )
                 for r in rows

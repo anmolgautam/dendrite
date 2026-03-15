@@ -62,6 +62,7 @@ class MockServerStore:
     _runs: dict[str, dict[str, Any]] = field(default_factory=dict)
     _pause_data: dict[str, dict[str, Any]] = field(default_factory=dict)
     _traces: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
         self._runs[run_id] = {
@@ -171,6 +172,17 @@ class MockServerStore:
 
     async def get_tool_calls(self, run_id: str) -> list[Any]:
         return []
+
+    async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
+        self._events.setdefault(run_id, []).append(kwargs)
+
+    async def get_run_events(self, run_id: str) -> list[Any]:
+        @dataclass
+        class _Event:
+            sequence_index: int = 0
+
+        raw = self._events.get(run_id, [])
+        return [_Event(sequence_index=e.get("sequence_index", i)) for i, e in enumerate(raw)]
 
     async def list_runs(self, **kwargs: Any) -> list[Any]:
         return []

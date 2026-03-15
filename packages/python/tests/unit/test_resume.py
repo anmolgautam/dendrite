@@ -68,6 +68,7 @@ class RecordingStateStore:
     _pause_data: dict[str, dict[str, Any]] = field(default_factory=dict)
     _run_status: dict[str, str] = field(default_factory=dict)
     _claimed: set[str] = field(default_factory=set)
+    _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
         self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
@@ -146,6 +147,29 @@ class RecordingStateStore:
 
     async def get_tool_calls(self, run_id: str) -> list[Any]:
         return []
+
+    async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
+        self._events.setdefault(run_id, []).append(kwargs)
+
+    async def get_run_events(self, run_id: str) -> list[Any]:
+        @dataclass
+        class _Event:
+            sequence_index: int
+            event_type: str = ""
+            iteration_index: int = 0
+            correlation_id: str | None = None
+            data: dict[str, Any] | None = None
+
+        return [
+            _Event(
+                sequence_index=e.get("sequence_index", 0),
+                event_type=e.get("event_type", ""),
+                iteration_index=e.get("iteration_index", 0),
+                correlation_id=e.get("correlation_id"),
+                data=e.get("data"),
+            )
+            for e in self._events.get(run_id, [])
+        ]
 
     async def list_runs(self, **kwargs: Any) -> list[Any]:
         return []

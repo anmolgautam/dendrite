@@ -46,7 +46,8 @@ class PersistenceObserver(LoopObserver):
     """Writes loop events to a StateStore for persistence.
 
     Tracks order_index internally to ensure react_traces are ordered
-    correctly within a single run.
+    correctly within a single run. Also records durable run_events
+    for dashboard timeline reconstruction.
 
     Args:
         redact: Optional callable that receives a string and returns a
@@ -66,6 +67,7 @@ class PersistenceObserver(LoopObserver):
         target_lookup: dict[str, ToolTarget] | None = None,
         redact: Callable[[str], str] | None = None,
         initial_order_index: int = 0,
+        event_sequencer: Any | None = None,
     ) -> None:
         self._store = state_store
         self._run_id = run_id
@@ -74,6 +76,35 @@ class PersistenceObserver(LoopObserver):
         self._target_lookup = target_lookup or {}
         self._redact = redact or _identity
         self._order_index = initial_order_index
+        # Shared sequencer from runner — guarantees globally monotonic
+        # sequence_index across runner-level and observer-level events.
+        self._event_sequencer = event_sequencer
+
+    async def _emit_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Record a durable run event. Failures are logged, never fatal."""
+        seq = self._event_sequencer.next() if self._event_sequencer else 0
+        try:
+            await self._store.save_run_event(
+                self._run_id,
+                event_type=event_type,
+                sequence_index=seq,
+                iteration_index=iteration,
+                correlation_id=correlation_id,
+                data=data,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record run event %s for run %s",
+                event_type,
+                self._run_id,
+                exc_info=True,
+            )
 
     async def on_message_appended(self, message: Message, iteration: int) -> None:
         """Persist a message to react_traces."""
@@ -110,7 +141,7 @@ class PersistenceObserver(LoopObserver):
         self._order_index += 1
 
     async def on_llm_call_completed(self, response: LLMResponse, iteration: int) -> None:
-        """Persist token usage from an LLM call."""
+        """Persist token usage and record llm.completed event."""
         await self._store.save_usage(
             self._run_id,
             iteration_index=iteration,
@@ -119,10 +150,23 @@ class PersistenceObserver(LoopObserver):
             provider=self._provider_name,
         )
 
+        # Durable event for dashboard timeline
+        await self._emit_event(
+            "llm.completed",
+            iteration,
+            {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "cost_usd": response.usage.cost_usd,
+                "model": self._model,
+                "has_tool_calls": bool(response.tool_calls),
+            },
+        )
+
     async def on_tool_completed(
         self, tool_call: ToolCall, tool_result: ToolResult, iteration: int
     ) -> None:
-        """Persist a tool call record with optional redaction."""
+        """Persist a tool call record and record tool.completed event."""
         # Redact params (string values only) before persistence
         params = tool_call.params if tool_call.params else None
         if params is not None:
@@ -132,16 +176,32 @@ class PersistenceObserver(LoopObserver):
         redacted_payload = self._redact(tool_result.payload)
         redacted_error = self._redact(tool_result.error) if tool_result.error else None
 
+        target = self._target_lookup.get(tool_call.name, "server")
+
         await self._store.save_tool_call(
             self._run_id,
             tool_call_id=tool_call.id,
             provider_tool_call_id=tool_call.provider_tool_call_id,
             tool_name=tool_call.name,
-            target=self._target_lookup.get(tool_call.name, "server"),
+            target=target,
             params=params,
             result_payload=redacted_payload,
             success=tool_result.success,
             duration_ms=tool_result.duration_ms,
             iteration_index=iteration,
             error_message=redacted_error,
+        )
+
+        # Durable event for dashboard timeline
+        # correlation_id links this event to the tool_call_id for tracing
+        await self._emit_event(
+            "tool.completed",
+            iteration,
+            {
+                "tool_name": tool_call.name,
+                "target": target,
+                "success": tool_result.success,
+                "duration_ms": tool_result.duration_ms,
+            },
+            correlation_id=tool_call.id,
         )

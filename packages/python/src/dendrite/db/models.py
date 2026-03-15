@@ -1,17 +1,17 @@
-"""SQLAlchemy models — the 4 Sprint 2 tables.
+"""SQLAlchemy models — the 5 core tables.
 
 Tables:
     agent_runs    — One row per run() call. The anchor for everything.
     react_traces  — Canonical conversation history for one agent run.
     tool_calls    — Every tool invocation with params, result, timing.
     token_usage   — Per-LLM-call token counts and cost.
+    run_events    — Append-only state transition log for observability.
 
 Each sub-agent spawn gets its own agent_run linked via parent_run_id.
 No instance_id or delegation columns on react_traces — isolation is
 structural (different agent_run_id = different traces).
 
 Deferred tables (added via migration in their sprint):
-    event_logs    — Sprint 4 (Workers & Crash Recovery)
     sandbox_runs  — Sprint 6 (Sandbox)
 """
 
@@ -98,6 +98,9 @@ class AgentRun(Base):
         back_populates="agent_run", cascade="all, delete-orphan"
     )
     token_usages: Mapped[list[TokenUsage]] = relationship(
+        back_populates="agent_run", cascade="all, delete-orphan"
+    )
+    run_events: Mapped[list[RunEvent]] = relationship(
         back_populates="agent_run", cascade="all, delete-orphan"
     )
     child_runs: Mapped[list[AgentRun]] = relationship(
@@ -210,3 +213,53 @@ class TokenUsage(Base):
     agent_run: Mapped[AgentRun] = relationship(back_populates="token_usages")
 
     __table_args__ = (Index("ix_token_usage_agent_run_id", "agent_run_id"),)
+
+
+class RunEvent(Base):
+    """Append-only state transition log for observability.
+
+    Records durable timestamps for every lifecycle event in a run:
+    started, LLM calls, tool calls, paused, resumed, completed, etc.
+
+    This table exists specifically so the dashboard can reconstruct
+    exact pause/resume timing without inferring from mutable columns
+    or cleared pause_data. Every event has an immutable created_at.
+
+    Ordering: sequence_index is the stable ordering key within a run.
+    Timestamps alone are not safe (concurrent events within the same ms).
+    The observer increments sequence_index monotonically.
+
+    Correlation: correlation_id links related events (e.g. tool.completed
+    back to the tool_call_id, run.resumed to the original run.paused).
+    This avoids ambiguity in multi-tool, multi-pause runs.
+
+    Privacy: dashboard renders only observable data from this table.
+    pause_data (unredacted execution state) is never exposed here.
+
+    Event types:
+        run.started, run.completed, run.error, run.cancelled,
+        run.paused, run.resumed,
+        llm.completed, tool.completed
+    """
+
+    __tablename__ = "run_events"
+
+    id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    agent_run_id: Mapped[str] = mapped_column(
+        String(26), ForeignKey("agent_runs.id", ondelete="CASCADE")
+    )
+    event_type: Mapped[str] = mapped_column(String(50))
+    sequence_index: Mapped[int] = mapped_column(Integer, default=0)
+    iteration_index: Mapped[int] = mapped_column(Integer, default=0)
+    correlation_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relationships
+    agent_run: Mapped[AgentRun] = relationship(back_populates="run_events")
+
+    __table_args__ = (
+        Index("ix_run_events_agent_run_id_seq", "agent_run_id", "sequence_index"),
+        Index("ix_run_events_event_type", "event_type"),
+    )
