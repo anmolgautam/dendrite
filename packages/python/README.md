@@ -7,15 +7,17 @@
 ## Install
 
 ```bash
-# From the repo root
 cd packages/python
-pip install -e ".[dev,db,anthropic]"
+pip install -e ".[anthropic,db,server]"
 ```
 
-**Extras:**
-- `dev` — pytest, ruff, mypy (for development)
-- `db` — SQLAlchemy, aiosqlite, Alembic (for persistence)
-- `anthropic` — Anthropic SDK (for Claude)
+| Extra | What it adds |
+|-------|-------------|
+| `anthropic` | Anthropic Claude SDK |
+| `db` | SQLAlchemy, aiosqlite, Alembic |
+| `server` | FastAPI, uvicorn |
+| `dev` | pytest, ruff, mypy, python-dotenv |
+| `postgres` | asyncpg |
 
 ## Minimal Example
 
@@ -39,14 +41,7 @@ result = await run(agent, provider=provider, user_input="What is 15 + 27?")
 print(result.answer)
 ```
 
-## Alpha Limitations
-
-- **No tool sandbox** — tools run in-process with full host privileges. Only run tools you trust.
-- **Opt-in trace redaction** — pass `redact=` to `run()` to scrub persisted content. Not enabled by default.
-- **Anthropic-only** — other LLM providers planned for Sprint 6.
-- **No client tool bridge** — pause/resume for client-side tools planned for Sprint 3.
-
-## API Reference
+## API Quick Reference
 
 ### Core
 
@@ -67,8 +62,16 @@ print(result.answer)
 
 | Import | What it does |
 |--------|-------------|
-| `from dendrite.db.session import get_engine` | Get/create async DB engine (auto-creates SQLite) |
+| `from dendrite.db.session import get_engine` | Async DB engine (auto-creates SQLite) |
 | `from dendrite.runtime.state import SQLAlchemyStateStore` | State store for `run(state_store=...)` |
+
+### Server
+
+| Import | What it does |
+|--------|-------------|
+| `from dendrite.server import create_app` | Mountable FastAPI app for hosted agents |
+| `from dendrite.server import AgentRegistry` | Register agents for hosting |
+| `from dendrite.server import HostedAgentConfig` | Agent config with provider/strategy factories |
 
 ### `run()` Parameters
 
@@ -88,9 +91,25 @@ result = await run(
 
 ```python
 result.answer          # str | None — the agent's final answer
-result.status          # RunStatus — SUCCESS, ERROR, MAX_ITERATIONS, WAITING_HUMAN_INPUT
+result.status          # RunStatus — SUCCESS, ERROR, MAX_ITERATIONS, WAITING_CLIENT_TOOL
 result.steps           # list[AgentStep] — full reasoning chain
 result.iteration_count # int — how many loop iterations ran
 result.usage           # UsageStats — input_tokens, output_tokens, total_tokens, cost_usd
 result.run_id          # str — unique run identifier (ULID)
 ```
+
+## Alpha Limitations
+
+- **No tool sandbox** — tools run in-process with full host privileges. Only run tools you trust.
+- **Opt-in trace redaction** — pass `redact=` to `run()` to scrub persisted content. Not enabled by default.
+- **Anthropic-only** — other LLM providers planned for a future sprint.
+
+## Full Documentation
+
+See the [main README](../../README.md) for:
+
+- Quick start guide with all three examples
+- Hosted agent setup with client tool pause/resume
+- Database and migration guide (SQLite + Postgres)
+- CLI cheatsheet
+- Common debugging
