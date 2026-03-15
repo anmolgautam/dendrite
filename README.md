@@ -1,20 +1,23 @@
-# Dendrite
+# 🌿 Dendrite
 
-> The runtime for agents that act in the real world.
+> *The runtime for agents that act in the real world.*
 
 Dendrite is a Python framework for building agents with tool calling, persistence, and full observability. Its core differentiator is the **client tool bridge**: an agent can pause when it needs a client-side tool like Excel, a browser, or a mobile app, wait for the client to execute it, then resume reasoning.
 
-## What You Can Do Today
+---
 
-- Define agents with plain Python tools
-- Run agents locally with Anthropic Claude
-- Persist runs, traces, tool calls, and token usage to SQLite or Postgres
-- Inspect runs and traces from the CLI
-- Host agents behind a FastAPI server
-- Stream agent events over SSE
-- Pause for client-side tools, submit results, and resume the run
+## ✨ What You Can Do Today
 
-## Install
+- 🛠️ Define agents with plain Python tools
+- 🤖 Run agents locally with Anthropic Claude
+- 💾 Persist runs, traces, tool calls, and token usage to SQLite or Postgres
+- 🔍 Inspect runs and traces from the CLI
+- 🌐 Host agents behind a FastAPI server with SSE streaming
+- ⏸️ Pause for client-side tools, submit results, and resume the run
+
+---
+
+## 📦 Install
 
 ```bash
 git clone https://github.com/anmolgautam/dendrite.git
@@ -28,7 +31,8 @@ For development:
 pip install -e ".[dev,db,anthropic,server]"
 ```
 
-**Install extras:**
+<details>
+<summary>📋 Install extras</summary>
 
 | Extra | What it adds |
 |-------|-------------|
@@ -38,9 +42,13 @@ pip install -e ".[dev,db,anthropic,server]"
 | `dev` | pytest, ruff, mypy, python-dotenv |
 | `postgres` | asyncpg (for Postgres instead of SQLite) |
 
-## After Installing
+</details>
 
-All commands below assume you are in `packages/python/`. The `dendrite` CLI, examples, and `make` targets all run from this directory.
+---
+
+## 🚀 After Installing
+
+> All commands below assume you are in `packages/python/`. The `dendrite` CLI, examples, and `make` targets all run from this directory.
 
 ### 1. Verify the install
 
@@ -48,7 +56,7 @@ All commands below assume you are in `packages/python/`. The `dendrite` CLI, exa
 dendrite --version
 ```
 
-You should see `0.1.0a1`.
+You should see `0.1.0a1`. You're good to go! 🎉
 
 ### 2. Set your API key
 
@@ -67,30 +75,30 @@ ANTHROPIC_API_KEY=sk-ant-your-key-here
 Run them in order — each one builds on the previous:
 
 ```bash
-# Example 1: Minimal agent with one tool
+# 🧮 Example 1: Minimal agent with one tool
 dendrite run examples/01_hello_world.py -i "What is 15 + 27?"
 
-# Example 2: Agent with persistence — traces saved to SQLite
+# 💾 Example 2: Agent with persistence — traces saved to SQLite
 python examples/02_persistent_agent.py
 
-# Inspect what happened
+# 🔍 Inspect what happened
 dendrite runs
 dendrite traces <run_id> --tools
 
-# Example 3: Client tool bridge — agent pauses for your input
+# ⏸️ Example 3: Client tool bridge — agent pauses for your input
 python examples/03_client_tools/server.py
 # Open http://localhost:8000
 ```
 
 For the client tool demo, use a prompt like:
 
-> Look up the AAPL stock price, then read cell A1 from my spreadsheet.
+> *"Look up the AAPL stock price, then read cell A1 from my spreadsheet."*
 
 The agent will call the server tool immediately, pause for the client tool, wait for your input in the browser, then resume and finish.
 
 ### 4. Build your own agent
 
-Create a Python file with three things:
+Create a Python file with three things — tools, an agent, and a run call:
 
 ```python
 from dendrite import Agent, tool, run
@@ -138,9 +146,11 @@ dendrite run my_agent.py -i "Do the thing"
 
 See `examples/01_hello_world.py` as a minimal template.
 
-## Three Ways To Use Dendrite
+---
 
-### 1. Local agent run
+## 🧩 Three Ways To Use Dendrite
+
+### 1. 🧮 Local agent run
 
 ```python
 from dendrite import Agent, tool, run
@@ -172,7 +182,7 @@ result = await run(
 print(result.answer)
 ```
 
-### 2. Persistent runs and inspection
+### 2. 💾 Persistent runs and inspection
 
 ```python
 from dendrite.db.session import get_engine
@@ -189,7 +199,7 @@ result = await run(
 )
 ```
 
-Once persistence is enabled, you can inspect runs and traces later:
+Once persistence is enabled, inspect runs and traces anytime:
 
 ```bash
 dendrite runs
@@ -198,7 +208,7 @@ dendrite traces <run_id>
 dendrite traces <run_id> --tools
 ```
 
-### 3. Hosted agents with client tool pause/resume
+### 3. ⏸️ Hosted agents with client tool pause/resume
 
 Define a client tool with `target="client"` — the agent pauses instead of executing it:
 
@@ -236,31 +246,39 @@ dendrite_app = create_app(
 app.mount("/dendrite", dendrite_app)
 ```
 
-The HTTP flow:
+**The HTTP flow:**
 
-1. `POST /runs` starts a run and returns `{run_id, token}`
-2. `GET /runs/{id}/events` streams SSE events in real time
-3. Agent calls a client tool and pauses with `WAITING_CLIENT_TOOL`
-4. Client executes the tool and `POST /runs/{id}/tool-results` with the result
-5. Agent resumes reasoning and finishes
+```
+Browser/Client              Dendrite Server              Agent Loop
+      │                           │                          │
+  1.  ├── POST /runs ──────────>  │ ── run() ─────────────>  │
+      │                           │                          ├─ LLM call
+  2.  ├── GET /events (SSE) ───>  │                          ├─ server tool ✅
+      │  <── run.step ──────────  │                          ├─ client tool → PAUSE ⏸️
+      │  <── run.paused ────────  │                          │
+      │                           │                          │  (waiting...)
+  3.  ├── POST /tool-results ──>  │ ── resume() ──────────>  │
+      │                           │                          ├─ LLM call
+  4.  │  <── run.completed ─────  │ <── RunResult ─────────  │  ✅
+```
 
 See the working demo: [`examples/03_client_tools/`](packages/python/examples/03_client_tools/)
 
-## Persistence and Database
+---
+
+## 💾 Persistence and Database
 
 Dendrite supports SQLite and Postgres.
 
-### SQLite (default, zero-config)
+### SQLite (default — zero config)
 
-SQLite is the default. It auto-creates tables on first use.
+SQLite is the default. It auto-creates tables on first use. No migrations needed.
 
 If `DENDRITE_DATABASE_URL` is not set, Dendrite uses:
 
 ```
 sqlite+aiosqlite:///./dendrite.db
 ```
-
-You do not need to run migrations for SQLite in normal local usage.
 
 ### Postgres
 
@@ -272,13 +290,9 @@ dendrite db migrate
 dendrite db status
 ```
 
-Notes:
+> **Note:** `dendrite db migrate` runs `alembic upgrade head`. The CLI resolves Alembic config automatically and works from any directory.
 
-- `dendrite db migrate` runs `alembic upgrade head`
-- `dendrite db status` shows the current migration revision
-- The CLI resolves Alembic config automatically and works from any directory
-
-### Schema changes after pulling new code
+### ⚠️ Schema changes after pulling new code
 
 SQLite auto-create only works on a **fresh** database. If you pull code that adds new columns to an existing `dendrite.db`:
 
@@ -292,7 +306,9 @@ dendrite db migrate
 
 Postgres always requires `dendrite db migrate` after schema changes.
 
-## CLI Cheatsheet
+---
+
+## 📟 CLI Cheatsheet
 
 ```bash
 # Run an agent
@@ -313,9 +329,12 @@ dendrite db migrate
 dendrite db status
 ```
 
-## Common Debugging
+---
 
-### "No runs found"
+## 🐛 Common Debugging
+
+<details>
+<summary><strong>"No runs found"</strong></summary>
 
 You are probably looking at the wrong database. Check:
 
@@ -325,7 +344,10 @@ echo $DENDRITE_DATABASE_URL
 
 If unset, Dendrite uses local SQLite at `./dendrite.db`. Make sure you are running CLI commands from the same directory where the agent ran.
 
-### "I ran an agent but no traces were saved"
+</details>
+
+<details>
+<summary><strong>"I ran an agent but no traces were saved"</strong></summary>
 
 Persistence is only enabled when you pass a `state_store`:
 
@@ -340,7 +362,10 @@ result = await run(
 
 Without `state_store`, the agent still runs but nothing is stored.
 
-### "Postgres tables are missing"
+</details>
+
+<details>
+<summary><strong>"Postgres tables are missing"</strong></summary>
 
 You likely skipped migrations:
 
@@ -351,7 +376,10 @@ dendrite db status
 
 SQLite auto-creates tables. Postgres does not.
 
-### "SQLite errors after pulling new code"
+</details>
+
+<details>
+<summary><strong>"SQLite errors after pulling new code"</strong></summary>
 
 If a new column was added and you have an existing `dendrite.db`:
 
@@ -363,15 +391,21 @@ rm dendrite.db
 dendrite db migrate
 ```
 
-### "The client tool demo does not pause"
+</details>
+
+<details>
+<summary><strong>"The client tool demo does not pause"</strong></summary>
 
 Your prompt probably did not trigger the client tool. Use an explicit prompt like:
 
-> Look up the AAPL stock price, then read cell A1 from my spreadsheet.
+> *"Look up the AAPL stock price, then read cell A1 from my spreadsheet."*
 
 The pause only happens when the model chooses a tool with `target="client"`.
 
-### "My hosted run is stuck in waiting_client_tool"
+</details>
+
+<details>
+<summary><strong>"My hosted run is stuck in waiting_client_tool"</strong></summary>
 
 That is expected until the client submits tool results. Resume it by posting to `POST /runs/{run_id}/tool-results`:
 
@@ -387,7 +421,10 @@ That is expected until the client submits tool results. Resume it by posting to 
 }
 ```
 
-### "I get 401 on run endpoints"
+</details>
+
+<details>
+<summary><strong>"I get 401 on run endpoints"</strong></summary>
 
 HMAC auth is enabled and the request is missing a valid bearer token for that specific run.
 
@@ -399,7 +436,10 @@ For real deployments, send the token returned by `POST /runs` in the header:
 Authorization: Bearer drn_...
 ```
 
-### "How do I inspect what actually happened?"
+</details>
+
+<details>
+<summary><strong>"How do I inspect what actually happened?"</strong></summary>
 
 ```bash
 dendrite runs                       # List all runs with status
@@ -409,7 +449,11 @@ dendrite traces <run_id> --tools    # Trace + tool call details
 
 `dendrite traces --tools` is the fastest way to see both the conversation and tool execution records.
 
-## Project Structure
+</details>
+
+---
+
+## 🗂️ Project Structure
 
 ```
 packages/python/
@@ -431,32 +475,38 @@ packages/python/
 └── tests/                  # 351 tests, 89% coverage
 ```
 
-## Current Status (v0.1.0a1)
+---
+
+## 📊 Current Status (v0.1.0a1)
 
 | Feature | Status |
 |---------|--------|
-| Agent loop + ReAct reasoning | Shipped |
-| Tool calling (sync + async, timeouts) | Shipped |
-| Anthropic Claude provider | Shipped |
-| SQLite + Postgres persistence | Shipped |
-| CLI (run, traces, runs, db) | Shipped |
-| Token usage tracking + redaction | Shipped |
-| Pause/resume for client tools | Shipped |
-| FastAPI hosting + SSE transport | Shipped |
-| Run-scoped HMAC auth | Shipped |
-| Worker pool / crash recovery | Planned |
-| TypeScript client SDK | Planned |
-| OpenAI + multi-provider support | Planned |
-| Tool sandbox / isolation | Planned |
+| Agent loop + ReAct reasoning | ✅ Shipped |
+| Tool calling (sync + async, timeouts) | ✅ Shipped |
+| Anthropic Claude provider | ✅ Shipped |
+| SQLite + Postgres persistence | ✅ Shipped |
+| CLI (run, traces, runs, db) | ✅ Shipped |
+| Token usage tracking + redaction | ✅ Shipped |
+| Pause/resume for client tools | ✅ Shipped |
+| FastAPI hosting + SSE transport | ✅ Shipped |
+| Run-scoped HMAC auth | ✅ Shipped |
+| Worker pool / crash recovery | 🔜 Planned |
+| TypeScript client SDK | 🔜 Planned |
+| OpenAI + multi-provider support | 🔜 Planned |
+| Tool sandbox / isolation | 🔜 Planned |
 
-## Requirements
+---
+
+## ⚙️ Requirements
 
 - Python 3.11+
 - An Anthropic API key (for running agents with Claude)
 
 Tests run without an API key — they use `MockLLM` for deterministic testing.
 
-## Development
+---
+
+## 🧑‍💻 Development
 
 ```bash
 cd packages/python
@@ -472,6 +522,8 @@ make ci
 | `make lint` | Check without fixing |
 | `make typecheck` | mypy strict mode |
 
-## License
+---
+
+## 📄 License
 
 [Apache 2.0](LICENSE)
