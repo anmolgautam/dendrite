@@ -1,7 +1,7 @@
 """Session factory — engine creation and async session management.
 
-Zero-config promise: first run() call auto-creates ./dendrite.db with all tables.
-No 'dendrite db migrate' needed for SQLite.
+Zero-config promise: first run() call auto-creates ~/.dendrite/dendrite.db
+with all tables. No 'dendrite db migrate' needed for SQLite.
 
 Postgres users set DENDRITE_DATABASE_URL and use Alembic migrations.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -26,11 +27,18 @@ _engine_url: str | None = None
 _session_factory: sessionmaker | None = None  # type: ignore[type-arg]
 _engine_lock = threading.Lock()
 
-DEFAULT_SQLITE_URL = "sqlite+aiosqlite:///./dendrite.db"
+# Default DB location: ~/.dendrite/dendrite.db
+# Single well-known path so all commands and examples share the same DB.
+_DENDRITE_DIR = Path.home() / ".dendrite"
+DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{_DENDRITE_DIR / 'dendrite.db'}"
 
 
 def get_database_url() -> str:
-    """Resolve database URL from environment or default to SQLite."""
+    """Resolve database URL from environment or default to SQLite.
+
+    Default: ~/.dendrite/dendrite.db (created automatically).
+    Override: set DENDRITE_DATABASE_URL for Postgres or custom path.
+    """
     return os.environ.get("DENDRITE_DATABASE_URL", DEFAULT_SQLITE_URL)
 
 
@@ -85,6 +93,10 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
     # Auto-create tables for SQLite (zero-config promise)
     # Outside the lock — idempotent and safe for concurrent calls
     if resolved_url.startswith("sqlite"):
+        # Ensure the parent directory exists (e.g. ~/.dendrite/)
+        db_path = resolved_url.split("///", 1)[-1] if "///" in resolved_url else None
+        if db_path:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         async with _engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
