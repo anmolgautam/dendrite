@@ -142,10 +142,10 @@ class ToolDef:
     Created by the @tool decorator. Used by strategies to describe tools
     to the LLM, and by the executor to dispatch tool calls.
 
-    Note: parallel, priority, max_calls_per_run, and timeout_seconds are
-    declared in the type system but not yet enforced by the runtime.
-    Sprint 1 executes all tool calls sequentially in request order.
-    Enforcement is planned for the execution engine in a future sprint.
+    Note: parallel, priority, and max_calls_per_run are declared in the
+    type system but not yet enforced by the runtime. Sprint 1 executes
+    all tool calls sequentially in request order. Enforcement is planned
+    for a future sprint.
     """
 
     name: str
@@ -155,7 +155,7 @@ class ToolDef:
     parallel: bool = True  # Declared, not yet enforced
     priority: int = 0  # Declared, not yet enforced
     max_calls_per_run: int | None = None  # Declared, not yet enforced
-    timeout_seconds: float = 30.0  # Declared, not yet enforced
+    timeout_seconds: float = 30.0  # Enforced by ReActLoop via asyncio.wait_for
 
 
 @dataclass(frozen=True)
@@ -270,6 +270,3 @@ class StreamEvent:
     tool_name: str | None = None
     tool_call_id: str | None = None
     raw: Any = None
-
-
-RunInput = str | dict[str, Any]

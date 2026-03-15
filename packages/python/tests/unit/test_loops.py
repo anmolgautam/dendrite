@@ -938,5 +938,32 @@ class TestReActLoopToolTimeout:
         assert "timed out" in tool_msgs[0].content
 
 
+class TestReActLoopDuplicateToolNames:
+    async def test_duplicate_tool_names_raise(self) -> None:
+        """A-08: Two tools with the same name should raise at loop start."""
+        from dendrite.loops.react import _build_tool_lookup
+        from dendrite.types import ToolDef
+
+        @tool()
+        async def samename(x: int) -> int:
+            """One."""
+            return x
+
+        @tool()
+        async def samename2(x: int) -> int:
+            """Two."""
+            return x
+
+        # Override the name on the second tool's ToolDef to collide
+        samename2.__tool_def__ = ToolDef(  # noqa: B010
+            name="samename",
+            description="Two.",
+            parameters=samename2.__tool_def__.parameters,
+        )
+
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            _build_tool_lookup([samename, samename2])
+
+
 # Need to import UsageStats for the usage test
 from dendrite.types import UsageStats  # noqa: E402

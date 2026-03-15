@@ -25,6 +25,8 @@ from dendrite.strategies.native import NativeToolCalling
 from dendrite.types import RunStatus, generate_ulid
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from dendrite.agent import Agent
     from dendrite.llm.base import LLMProvider
     from dendrite.loops.base import Loop
@@ -45,6 +47,7 @@ async def run(
     state_store: StateStore | None = None,
     tenant_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    redact: Callable[[str], str] | None = None,
     **kwargs: Any,
 ) -> RunResult:
     """Run an agent to completion.
@@ -64,6 +67,9 @@ async def run(
         tenant_id: Optional tenant ID for multi-tenant isolation.
         metadata: Optional developer linking data (thread_id, user_id, etc.).
             Stored in agent_runs.meta — Dendrite stores it, never reads it.
+        redact: Optional string scrubber applied to all persisted content
+            (trace text, tool params, result payloads, error messages).
+            Receives a plain string, must return a plain string.
         **kwargs: Reserved for future use.
 
     Returns:
@@ -95,10 +101,12 @@ async def run(
 
     if state_store is not None:
         # Create the run record before the loop starts
+        # Apply redaction to user input before persistence
+        redacted_input = redact(user_input) if redact else user_input
         await state_store.create_run(
             run_id,
             agent.name,
-            input_data={"input": user_input},
+            input_data={"input": redacted_input},
             model=agent.model,
             strategy=type(resolved_strategy).__name__,
             tenant_id=tenant_id,
@@ -119,6 +127,7 @@ async def run(
             model=agent.model,
             provider_name=type(provider).__name__,
             target_lookup=target_lookup,
+            redact=redact,
         )
 
     try:
@@ -133,10 +142,11 @@ async def run(
 
         # Finalize with success or max_iterations
         if state_store is not None:
+            redacted_answer = redact(result.answer) if redact and result.answer else result.answer
             await state_store.finalize_run(
                 run_id,
                 status=result.status.value,
-                answer=result.answer,
+                answer=redacted_answer,
                 iteration_count=result.iteration_count,
                 total_usage=result.usage,
             )
@@ -150,10 +160,11 @@ async def run(
         # by the observer) remain the source of truth for errored runs.
         if state_store is not None:
             try:
+                redacted_err = redact(str(exc)) if redact else str(exc)
                 await state_store.finalize_run(
                     run_id,
                     status=RunStatus.ERROR.value,
-                    error=str(exc),
+                    error=redacted_err,
                     total_usage=None,
                 )
             except Exception:

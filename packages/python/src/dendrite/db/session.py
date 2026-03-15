@@ -92,14 +92,20 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
 
 
 async def reset_engine() -> None:
-    """Dispose the current engine and session factory. Used in tests for cleanup."""
+    """Dispose the current engine and session factory. Used in tests for cleanup.
+
+    Releases the lock before awaiting dispose() to avoid holding a
+    synchronous lock across an async suspension point.
+    """
     global _engine, _engine_url, _session_factory  # noqa: PLW0603
     with _engine_lock:
-        if _engine is not None:
-            await _engine.dispose()
-            _engine = None
-            _engine_url = None
-            _session_factory = None
+        engine = _engine
+        _engine = None
+        _engine_url = None
+        _session_factory = None
+    # Dispose outside the lock — no deadlock risk
+    if engine is not None:
+        await engine.dispose()
 
 
 @asynccontextmanager

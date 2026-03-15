@@ -246,3 +246,44 @@ class TestSchemaGeneration:
             async def fn(a) -> str:  # noqa: ANN001
                 """Test."""
                 return str(a)
+
+    def test_union_type_raises_type_error(self) -> None:
+        """C-05: Multi-type unions like str | int are rejected."""
+        with pytest.raises(TypeError, match="Union type"):
+
+            @tool()
+            async def fn(x: str | int) -> str:
+                """Test."""
+                return str(x)
+
+    def test_optional_union_with_none_is_valid(self) -> None:
+        """Optional[str] (str | None) should still work."""
+
+        @tool()
+        async def fn(x: str | None = None) -> str:
+            """Test."""
+            return str(x)
+
+        schema = get_tool_def(fn).parameters
+        assert schema["properties"]["x"]["type"] == "string"
+
+    def test_non_json_serializable_default_raises(self) -> None:
+        """A-02: Defaults that can't be JSON-serialized raise at decoration time."""
+        from datetime import datetime
+
+        with pytest.raises(TypeError, match="not JSON-serializable"):
+
+            @tool()
+            async def fn(x: str = datetime.now()) -> str:  # noqa: B008
+                """Test."""
+                return x
+
+    def test_invalid_tool_name_raises(self) -> None:
+        """A-01: Non-identifier names are rejected."""
+        import types
+
+        fn = types.FunctionType((lambda: None).__code__, {}, "<lambda>")
+        fn.__doc__ = "Test."
+        fn.__annotations__ = {"return": str}
+        with pytest.raises(ValueError, match="not a valid Python identifier"):
+            tool()(fn)

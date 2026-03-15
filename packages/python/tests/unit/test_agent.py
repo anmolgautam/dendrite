@@ -184,6 +184,26 @@ class TestAgentValidation:
                 max_iterations=-1,
             )
 
+    def test_max_iterations_exceeds_ceiling_raises(self):
+        from dendrite.agent import MAX_ITERATIONS_CEILING
+
+        with pytest.raises(ValueError, match="cannot exceed"):
+            Agent(
+                model="claude-sonnet-4-6",
+                prompt="Hello.",
+                max_iterations=MAX_ITERATIONS_CEILING + 1,
+            )
+
+    def test_max_iterations_at_ceiling_is_valid(self):
+        from dendrite.agent import MAX_ITERATIONS_CEILING
+
+        agent = Agent(
+            model="claude-sonnet-4-6",
+            prompt="Hello.",
+            max_iterations=MAX_ITERATIONS_CEILING,
+        )
+        assert agent.max_iterations == MAX_ITERATIONS_CEILING
+
 
 class TestAgentToolDefs:
     """Agent.get_tool_defs() extracts ToolDefs from registered tools."""

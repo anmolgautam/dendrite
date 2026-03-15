@@ -215,3 +215,111 @@ class TestOnToolCompleted:
         await obs.on_tool_completed(tc, result, iteration=1)
 
         assert store.tool_calls[0]["params"] is None
+
+
+# ------------------------------------------------------------------
+# Redaction
+# ------------------------------------------------------------------
+
+
+class TestRedaction:
+    async def test_redact_scrubs_trace_content(self) -> None:
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+
+        msg = Message(role=Role.USER, content="my secret password")
+        await obs.on_message_appended(msg, iteration=0)
+
+        assert store.traces[0]["content"] == "my *** password"
+
+    async def test_redact_scrubs_tool_params(self) -> None:
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("token123", "***"))
+
+        tc = ToolCall(name="auth", params={"key": "token123", "count": 5})
+        msg = Message(role=Role.ASSISTANT, content="calling", tool_calls=[tc])
+        await obs.on_message_appended(msg, iteration=1)
+
+        saved_params = store.traces[0]["meta"]["tool_calls"][0]["params"]
+        assert saved_params["key"] == "***"
+        assert saved_params["count"] == 5  # non-string values preserved
+
+    async def test_redact_scrubs_tool_result_payload(self) -> None:
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+
+        tc = ToolCall(name="fetch", params={"url": "x"})
+        result = ToolResult(name="fetch", call_id=tc.id, payload='{"data": "secret"}', success=True)
+        await obs.on_tool_completed(tc, result, iteration=1)
+
+        assert "secret" not in store.tool_calls[0]["result_payload"]
+        assert "***" in store.tool_calls[0]["result_payload"]
+
+    async def test_redact_scrubs_error_message(self) -> None:
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+
+        tc = ToolCall(name="bad", params={})
+        result = ToolResult(
+            name="bad", call_id=tc.id, payload="{}", success=False, error="secret leaked"
+        )
+        await obs.on_tool_completed(tc, result, iteration=1)
+
+        assert store.tool_calls[0]["error_message"] == "*** leaked"
+
+    async def test_aggressive_redactor_does_not_crash(self) -> None:
+        """A redactor that returns '***' for everything should not raise."""
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda _: "***")
+
+        msg = Message(role=Role.USER, content="hello")
+        await obs.on_message_appended(msg, iteration=0)
+        assert store.traces[0]["content"] == "***"
+
+        tc = ToolCall(name="fetch", params={"url": "http://example.com"})
+        result = ToolResult(name="fetch", call_id=tc.id, payload='{"ok": true}', success=True)
+        await obs.on_tool_completed(tc, result, iteration=1)
+        assert store.tool_calls[0]["result_payload"] == "***"
+        assert store.tool_calls[0]["params"] == {"url": "***"}
+
+    async def test_no_redact_is_identity(self) -> None:
+        """Without redact, content passes through unchanged."""
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1")
+
+        msg = Message(role=Role.USER, content="secret data")
+        await obs.on_message_appended(msg, iteration=0)
+        assert store.traces[0]["content"] == "secret data"
+
+    async def test_redact_handles_nested_params(self) -> None:
+        """Redaction should recurse into nested dicts and lists."""
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+
+        tc = ToolCall(
+            name="deploy",
+            params={
+                "name": "my-app",
+                "config": {"api_key": "secret-key", "port": 8080},
+                "tags": ["secret-tag", "public"],
+            },
+        )
+        msg = Message(role=Role.ASSISTANT, content="deploying", tool_calls=[tc])
+        await obs.on_message_appended(msg, iteration=1)
+
+        saved = store.traces[0]["meta"]["tool_calls"][0]["params"]
+        assert saved["name"] == "my-app"
+        assert saved["config"]["api_key"] == "***-key"
+        assert saved["config"]["port"] == 8080
+        assert saved["tags"] == ["***-tag", "public"]
+
+    async def test_redact_nested_in_tool_completed(self) -> None:
+        """on_tool_completed also recurses into nested params."""
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+
+        tc = ToolCall(name="auth", params={"creds": {"password": "secret123"}})
+        result = ToolResult(name="auth", call_id=tc.id, payload="{}", success=True)
+        await obs.on_tool_completed(tc, result, iteration=1)
+
+        assert store.tool_calls[0]["params"]["creds"]["password"] == "***123"

@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 
     from dendrite.types import ToolDef
 
+# Safety limit to prevent runaway LLM costs. Can be overridden per-agent
+# once the worker/config layer ships (Sprint 6).
+MAX_ITERATIONS_CEILING = 200
+
 # Sentinel to detect "not provided" vs explicitly set to a value
 _UNSET: Any = object()
 
@@ -106,6 +110,11 @@ class Agent:
         if self.max_iterations < 1:
             raise ValueError(
                 f"Agent '{self.name}' max_iterations must be >= 1, got {self.max_iterations}."
+            )
+        if self.max_iterations > MAX_ITERATIONS_CEILING:
+            raise ValueError(
+                f"Agent '{self.name}' max_iterations cannot exceed "
+                f"{MAX_ITERATIONS_CEILING}, got {self.max_iterations}."
             )
 
     def get_tool_defs(self) -> list[ToolDef]:

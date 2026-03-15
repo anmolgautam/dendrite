@@ -2,104 +2,194 @@
 
 > The runtime for agents that act in the real world.
 
-Client tool execution, human-in-the-loop, resumability, full observability. From prototype to production.
+Dendrite is a Python framework for building AI agents with tool calling, state persistence, and full observability. Define an agent, give it tools, run it — every step is traced and stored.
 
-## Status
+**What's working today:** Agent loop, ReAct reasoning, tool calling (sync + async), Anthropic Claude integration, SQLite/Postgres persistence, CLI for running agents and inspecting traces, token usage tracking.
 
-Under active development. Not yet published.
+## Quick Start
 
-### Alpha Limitations (v0.1.0-alpha.2)
+### 1. Clone and install
 
-This is an early alpha. The following features are **planned but not yet shipped**:
+```bash
+git clone https://github.com/user/dendrite.git
+cd dendrite/packages/python
+pip install -e ".[dev,db,anthropic]"
+```
 
-- Client tool execution (pause/resume for client-side tools)
-- Human-in-the-loop approval flows
-- SSE transport and polling endpoints
-- Run-scoped HMAC tokens and nonce guards
-- Worker pool with crash recovery
-- Filesystem sandbox for tool isolation
-- TypeScript client SDK
-- OpenAI / multi-provider support
+### 2. Set up your API key
 
-What **is** shipped: agent loop, ReAct, tool calling, Anthropic provider, SQLite/Postgres persistence, CLI, full trace recording, and token usage tracking.
+```bash
+cp ../../.env.example ../../.env
+# Edit .env and add your Anthropic API key:
+# ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
 
-## Packages
+### 3. Run the hello world example
 
-| Package | Language | Status |
-|---------|----------|--------|
-| [dendrite](packages/python/) | Python | In development |
+```bash
+# Via CLI
+dendrite run examples/01_hello_world.py -i "What is 15 + 27?"
+
+# Or directly
+ANTHROPIC_API_KEY=sk-ant-... python examples/01_hello_world.py
+```
+
+### 4. Try the persistent agent (traces + DB)
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... python examples/02_persistent_agent.py
+
+# Then inspect what happened:
+dendrite runs                          # List all runs
+dendrite traces <run_id> --tools       # See the full reasoning trace
+```
+
+## How It Works
+
+```python
+from dendrite import Agent, tool, run
+from dendrite.llm.anthropic import AnthropicProvider
+
+# 1. Define tools — plain Python functions
+@tool()
+async def add(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b
+
+# 2. Define an agent
+agent = Agent(
+    model="claude-sonnet-4-6",
+    prompt="You are a helpful calculator.",
+    tools=[add],
+)
+
+# 3. Run it
+provider = AnthropicProvider(api_key="sk-ant-...", model="claude-sonnet-4-6")
+result = await run(agent, provider=provider, user_input="What is 15 + 27?")
+print(result.answer)  # "42"
+```
+
+### With persistence (traces saved to SQLite)
+
+```python
+from dendrite.db.session import get_engine
+from dendrite.runtime.state import SQLAlchemyStateStore
+
+engine = await get_engine()  # Auto-creates ./dendrite.db
+store = SQLAlchemyStateStore(engine)
+
+result = await run(
+    agent,
+    provider=provider,
+    user_input="What is 15 + 27?",
+    state_store=store,  # Every step is now persisted
+)
+
+# Inspect later:
+# dendrite runs
+# dendrite traces <run_id> --tools
+```
+
+### With redaction (scrub secrets before storing)
+
+```python
+result = await run(
+    agent,
+    provider=provider,
+    user_input="My password is hunter2",
+    state_store=store,
+    redact=lambda s: s.replace("hunter2", "***"),  # Applied to all persisted data
+)
+```
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `dendrite run <file> -i "prompt"` | Run an agent from a Python file |
+| `dendrite runs` | List recent agent runs |
+| `dendrite traces <run_id>` | Show the reasoning trace for a run |
+| `dendrite traces <run_id> --tools` | Include tool call details |
+| `dendrite db migrate` | Run database migrations (Postgres) |
+| `dendrite db status` | Show current migration revision |
+| `dendrite --version` | Show version |
+
+## Project Structure
+
+```
+dendrite/
+├── packages/python/
+│   ├── src/dendrite/          # Source code
+│   │   ├── agent.py           # Agent definition
+│   │   ├── tool.py            # @tool decorator + schema generation
+│   │   ├── types.py           # Core types (Message, ToolCall, RunResult, etc.)
+│   │   ├── llm/               # LLM providers (Anthropic, Mock)
+│   │   ├── loops/             # Execution loops (ReAct)
+│   │   ├── strategies/        # Tool calling strategies (NativeToolCalling)
+│   │   ├── runtime/           # Runner, observer, state store
+│   │   ├── db/                # SQLAlchemy models, migrations
+│   │   └── cli/               # CLI commands
+│   ├── tests/                 # 258 tests (95%+ coverage)
+│   └── examples/              # Working examples
+├── .env.example               # API key template
+└── Makefile                   # Dev commands
+```
+
+## Requirements
+
+- Python 3.11+
+- An Anthropic API key (for running agents with Claude)
+
+Tests run without an API key — they use `MockLLM` for deterministic testing.
 
 ## Development
 
-### Prerequisites
-
-- Python 3.11+
-
-### Setup
-
 ```bash
 cd packages/python
-pip install -e ".[dev,db,anthropic]"    # Install with all dev dependencies
-pre-commit install                      # Set up git hooks (auto-lint on commit)
+
+# Install with all dev dependencies
+pip install -e ".[dev,db,anthropic]"
+
+# Run all checks (lint + typecheck + tests)
+make ci
+
+# Auto-fix formatting
+make format
+
+# Run tests only
+make test
 ```
-
-### Commands
-
-All commands can be run from the repo root. They delegate to the appropriate package.
 
 | Command | What it does |
 |---------|-------------|
-| `make ci` | Run all checks — lint + typecheck + tests. **Run this before every commit.** |
-| `make test` | Run tests only (`pytest tests/ -v`) |
-| `make lint` | Check code style and formatting (`ruff check .` + `ruff format --check .`) |
-| `make typecheck` | Check type annotations (`mypy src/dendrite/`) |
-| `make format` | Auto-fix formatting and lint issues (`ruff format .` + `ruff check --fix .`) |
-| `make clean` | Remove build artifacts, caches |
+| `make ci` | Lint (ruff) + typecheck (mypy) + tests (pytest) — **run before every commit** |
+| `make test` | Tests only |
+| `make format` | Auto-fix formatting and lint issues |
+| `make lint` | Check lint + formatting without fixing |
+| `make typecheck` | Check type annotations |
 
-### Typical workflow
+## Current Status (v0.1.0a1)
 
-```bash
-# 1. Write code
-# 2. Auto-fix formatting
-make format
+This is an early alpha. What's shipped vs what's planned:
 
-# 3. Run all checks
-make ci
-
-# 4. If green, commit
-git commit -m "your message"
-```
-
-If `make ci` fails, `make format` often fixes lint/format issues automatically. Type errors and test failures need manual fixing.
-
-### What `make ci` checks
-
-1. **`ruff check .`** — Lints for code quality issues (unused imports, bad patterns, import sorting)
-2. **`ruff format --check .`** — Verifies code formatting (consistent style, line length ≤100)
-3. **`mypy src/dendrite/`** — Static type checking (catches type mismatches, missing annotations)
-4. **`pytest tests/ -v`** — Runs all tests with verbose output
-
-All four must pass. Same checks run on GitHub Actions CI for every push.
+| Feature | Status |
+|---------|--------|
+| Agent loop + ReAct reasoning | Shipped |
+| Tool calling (sync + async, timeouts) | Shipped |
+| Anthropic Claude provider | Shipped |
+| SQLite + Postgres persistence | Shipped |
+| CLI (run, traces, runs, db) | Shipped |
+| Token usage tracking | Shipped |
+| Opt-in trace redaction | Shipped |
+| Tool sandbox / isolation | Planned (Sprint 6) |
+| Client tool bridge (pause/resume) | Planned (Sprint 3) |
+| Worker pool / crash recovery | Planned (Sprint 4) |
+| OpenAI + multi-provider support | Planned (Sprint 6) |
+| TypeScript client SDK | Planned (Sprint 5) |
 
 ## Built with Claude Code
 
-Dendrite is built entirely through AI pair programming using [Claude Code](https://claude.ai/code). We're transparent about this because we are exploring and we also think that it's worth documenting how large projects can be built effectively with LLMs.
-
-### The approach
-
-We use a 5-layer doc architecture that keeps the LLM aligned across conversations:
-
-| Layer | Doc | Purpose |
-|-------|-----|---------|
-| 1. Vision | `PRODUCT_VISION.md` | Where we're going. Aspirational, never changes tense. |
-| 2. Decisions | `ENGINEERING_CHOICES.md` | Why we made each architectural choice. Logged with rationale. |
-| 3. Build order | `IMPLEMENTATION_STRATEGY.md` | How we build it. Sprint gates, dependency chains. |
-| 4. Status map | `SPRINT_STATUS_MAP.md` | Where we are. Maps every vision feature to shipped/pending. |
-| 5. Code | `packages/python/src/` | The truth. Tests prove it works. |
-
-The key insight: **vision docs describe the destination, the status map describes reality.** Without that separation, the LLM reads aspirational docs and assumes everything is already built — leading to doc drift, overclaiming, and confusion. The status map is the single source of truth for what actually exists.
-
-Every commit is co-authored. Every design decision is discussed before implementation. The LLM proposes, the human approves. We are exploring the strategies and appraoches to make sure code is production-grade from day one following SOLID, typed, tested, linted.
+Dendrite is built through AI pair programming using [Claude Code](https://claude.ai/code). Every commit is co-authored, every design decision discussed before implementation. We use a 5-layer doc architecture to keep the LLM aligned across conversations — vision docs describe the destination, the status map describes reality.
 
 ## License
 

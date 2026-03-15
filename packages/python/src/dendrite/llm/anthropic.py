@@ -78,6 +78,19 @@ class AnthropicProvider(LLMProvider):
         )
         self._model = model
 
+    def __repr__(self) -> str:
+        return f"AnthropicProvider(model={self._model!r})"
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client and release connections."""
+        await self._client.close()
+
+    async def __aenter__(self) -> AnthropicProvider:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
     async def complete(
         self,
         messages: list[Message],

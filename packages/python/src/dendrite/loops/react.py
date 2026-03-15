@@ -266,6 +266,11 @@ def _build_tool_lookup(
     timeout_lookup: dict[str, float] = {}
     for fn in tools:
         td = get_tool_def(fn)
+        if td.name in fn_lookup:
+            raise ValueError(
+                f"Duplicate tool name '{td.name}'. "
+                f"Each tool registered on an agent must have a unique name."
+            )
         fn_lookup[td.name] = fn
         target_lookup[td.name] = td.target
         timeout_lookup[td.name] = td.timeout_seconds

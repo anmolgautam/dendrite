@@ -24,8 +24,12 @@ def list_runs(
 
 
 async def _list_runs(limit: int, offset: int, status: str | None, tenant_id: str | None) -> None:
-    from dendrite.db.session import get_engine
-    from dendrite.runtime.state import SQLAlchemyStateStore
+    try:
+        from dendrite.db.session import get_engine, reset_engine
+        from dendrite.runtime.state import SQLAlchemyStateStore
+    except ImportError:
+        console.print("[red]Database support not installed.[/red] Run: pip install dendrite[db]")
+        raise typer.Exit(1) from None
 
     try:
         engine = await get_engine()
@@ -33,8 +37,16 @@ async def _list_runs(limit: int, offset: int, status: str | None, tenant_id: str
         console.print(f"[red]Cannot connect to database:[/red] {e}")
         raise typer.Exit(1) from None
 
-    store = SQLAlchemyStateStore(engine)
-    runs = await store.list_runs(limit=limit, offset=offset, tenant_id=tenant_id, status=status)
+    try:
+        store = SQLAlchemyStateStore(engine)
+        runs = await store.list_runs(
+            limit=min(limit, 1000),
+            offset=max(0, offset),
+            tenant_id=tenant_id,
+            status=status,
+        )
+    finally:
+        await reset_engine()
 
     if not runs:
         console.print("[dim]No runs found.[/dim]")

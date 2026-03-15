@@ -51,8 +51,8 @@ class MockLLM(LLMProvider):
 
         self.call_history.append(
             {
-                "messages": messages,
-                "tools": tools,
+                "messages": list(messages),
+                "tools": list(tools) if tools else tools,
                 "kwargs": kwargs,
             }
         )

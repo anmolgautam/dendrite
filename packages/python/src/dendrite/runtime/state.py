@@ -316,7 +316,7 @@ class SQLAlchemyStateStore:
         status: str,
         answer: str | None = None,
         error: str | None = None,
-        iteration_count: int = 0,
+        iteration_count: int | None = None,
         total_usage: UsageStats | None = None,
     ) -> None:
         from sqlalchemy import func, update
@@ -326,9 +326,10 @@ class SQLAlchemyStateStore:
         async with self._session_factory() as session:
             values: dict[str, Any] = {
                 "status": status,
-                "iteration_count": iteration_count,
                 "updated_at": func.now(),
             }
+            if iteration_count is not None:
+                values["iteration_count"] = iteration_count
             if answer is not None:
                 values["output_data"] = {"answer": answer}
             if error is not None:
@@ -425,7 +426,8 @@ class SQLAlchemyStateStore:
 
         from dendrite.db.models import AgentRun
 
-        capped_limit = min(limit, self._MAX_LIST_LIMIT)
+        capped_limit = min(max(1, limit), self._MAX_LIST_LIMIT)
+        clamped_offset = max(0, offset)
 
         async with self._session_factory() as session:
             stmt = select(AgentRun).order_by(AgentRun.created_at.desc())
@@ -433,7 +435,7 @@ class SQLAlchemyStateStore:
                 stmt = stmt.where(AgentRun.tenant_id == tenant_id)
             if status is not None:
                 stmt = stmt.where(AgentRun.status == status)
-            stmt = stmt.limit(capped_limit).offset(offset)
+            stmt = stmt.limit(capped_limit).offset(clamped_offset)
 
             result = await session.execute(stmt)
             rows = result.scalars().all()
@@ -448,7 +450,7 @@ def _run_to_record(row: AgentRun) -> RunRecord:
     return RunRecord(
         id=row.id,
         agent_name=row.agent_name,
-        status=row.status,
+        status=row.status.value if hasattr(row.status, "value") else str(row.status),
         input_data=row.input_data,
         output_data=row.output_data,
         answer=answer,
@@ -460,7 +462,7 @@ def _run_to_record(row: AgentRun) -> RunRecord:
         delegation_level=row.delegation_level,
         total_input_tokens=row.total_input_tokens,
         total_output_tokens=row.total_output_tokens,
-        total_cost_usd=float(row.total_cost_usd) if row.total_cost_usd else None,
+        total_cost_usd=float(row.total_cost_usd) if row.total_cost_usd is not None else None,
         meta=row.meta,
         created_at=row.created_at,
         updated_at=row.updated_at,

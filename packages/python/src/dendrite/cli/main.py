@@ -53,11 +53,17 @@ def run(
         "", "--agent", "-a", help="Agent class/variable name. Auto-detected if omitted."
     ),
 ) -> None:
-    """Run an agent from a Python file."""
-    # Load the module from the file
+    """Run an agent from a Python file.
+
+    This command executes the specified Python file to find and run an Agent.
+    Only run files you trust — the file runs with full host privileges.
+    """
     path = Path(file).resolve()
     if not path.exists():
         console.print(f"[red]File not found:[/red] {file}")
+        raise typer.Exit(1)
+    if path.suffix != ".py":
+        console.print(f"[red]Only .py files are supported.[/red] Got: {path.suffix or '(none)'}")
         raise typer.Exit(1)
 
     module = _load_module(path)
@@ -92,9 +98,18 @@ def run(
             console.print(f'[dim]\\[Step {i}][/dim] Agent finished: "{step.action.answer}"')
 
     console.print()
+
+    from dendrite.types import RunStatus
+
+    status_display = {
+        RunStatus.SUCCESS: ("[green]✓[/green]", "Completed"),
+        RunStatus.MAX_ITERATIONS: ("[yellow]⚠[/yellow]", "Stopped (max iterations)"),
+        RunStatus.WAITING_HUMAN_INPUT: ("[blue]⏸[/blue]", "Waiting for input"),
+        RunStatus.ERROR: ("[red]✗[/red]", "Failed"),
+    }
+    icon, label = status_display.get(result.status, ("·", result.status.value))
     console.print(
-        f"[green]✓[/green] Completed in {result.iteration_count} iterations, "
-        f"{result.usage.total_tokens} tokens"
+        f"{icon} {label} in {result.iteration_count} iterations, {result.usage.total_tokens} tokens"
     )
 
 

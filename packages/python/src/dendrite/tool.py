@@ -8,6 +8,7 @@ callable as normal. Schema is auto-generated from type hints.
 from __future__ import annotations
 
 import inspect
+import json
 import typing
 import warnings
 from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
@@ -46,9 +47,15 @@ def tool(
     """
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        name = fn.__name__
+        if not name.isidentifier():
+            raise ValueError(
+                f"Tool name '{name}' is not a valid Python identifier. "
+                f"Use a named function instead of a lambda or dynamic callable."
+            )
         schema = _generate_schema(fn)
         tool_def = ToolDef(
-            name=fn.__name__,
+            name=name,
             description=(fn.__doc__ or "").strip(),
             parameters=schema,
             target=ToolTarget(target),
@@ -99,6 +106,13 @@ def _generate_schema(fn: Callable[..., Any]) -> dict[str, Any]:
 
         has_default = param.default is not inspect.Parameter.empty
         if has_default:
+            try:
+                json.dumps(param.default)
+            except (TypeError, ValueError) as e:
+                raise TypeError(
+                    f"Default value for parameter '{name}' of tool '{fn.__name__}' "
+                    f"is not JSON-serializable: {param.default!r}"
+                ) from e
             prop["default"] = param.default
         elif not _is_optional(hint):
             required.append(name)
@@ -119,6 +133,17 @@ def _type_to_schema(hint: type) -> dict[str, Any]:
         return _type_to_schema(inner)
 
     origin = get_origin(hint)
+
+    # Reject non-optional union types (e.g., str | int)
+    if origin is type(int | str) or origin is typing.Union:
+        args = get_args(hint)
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) > 1:
+            raise TypeError(
+                f"Union type {hint!r} is not supported in tool schemas. "
+                f"Only Optional[T] (T | None) is allowed. "
+                f"Got non-None types: {non_none!r}."
+            )
 
     if origin is list:
         args = get_args(hint)
@@ -154,9 +179,16 @@ def _is_optional(hint: type) -> bool:
 def _unwrap_optional(hint: type) -> type:
     """Extract the inner type from Optional[X] / X | None.
 
-    Note: For multi-type unions like ``str | int | None``, only the first
-    non-None type is used. Full JSON Schema ``oneOf`` support is deferred.
+    Raises TypeError for multi-type unions like ``str | int | None`` because
+    they cannot be represented as a single JSON Schema type. Only
+    ``Optional[T]`` (i.e., ``T | None``) is supported.
     """
     args = get_args(hint)
     non_none = [a for a in args if a is not type(None)]
+    if len(non_none) > 1:
+        raise TypeError(
+            f"Union type {hint!r} is not supported in tool schemas. "
+            f"Only Optional[T] (T | None) is allowed. "
+            f"Got non-None types: {non_none!r}."
+        )
     return non_none[0] if non_none else str

@@ -24,8 +24,12 @@ def show_traces(
 
 
 async def _show_traces(run_id: str, show_tool_calls: bool) -> None:
-    from dendrite.db.session import get_engine
-    from dendrite.runtime.state import SQLAlchemyStateStore
+    try:
+        from dendrite.db.session import get_engine, reset_engine
+        from dendrite.runtime.state import SQLAlchemyStateStore
+    except ImportError:
+        console.print("[red]Database support not installed.[/red] Run: pip install dendrite[db]")
+        raise typer.Exit(1) from None
 
     try:
         engine = await get_engine()
@@ -35,67 +39,70 @@ async def _show_traces(run_id: str, show_tool_calls: bool) -> None:
 
     store = SQLAlchemyStateStore(engine)
 
-    # Fetch run info
-    run = await store.get_run(run_id)
-    if run is None:
-        console.print(f"[red]Run not found:[/red] {run_id}")
-        raise typer.Exit(1)
+    try:
+        # Fetch run info
+        run = await store.get_run(run_id)
+        if run is None:
+            console.print(f"[red]Run not found:[/red] {run_id}")
+            raise typer.Exit(1)
 
-    # Print run header
-    console.print(
-        Panel(
-            f"[bold]{run.agent_name}[/bold]  •  {run.status}  •  "
-            f"{run.iteration_count} iterations  •  model: {run.model or '—'}",
-            title=f"Run {run.id}",
-            border_style="cyan",
+        # Print run header
+        console.print(
+            Panel(
+                f"[bold]{run.agent_name}[/bold]  •  {run.status}  •  "
+                f"{run.iteration_count} iterations  •  model: {run.model or '—'}",
+                title=f"Run {run.id}",
+                border_style="cyan",
+            )
         )
-    )
 
-    # Fetch and display traces
-    traces = await store.get_traces(run_id)
-    if not traces:
-        console.print("[dim]No traces recorded.[/dim]")
-    else:
-        console.print()
-        for trace in traces:
-            role_style = {
-                "user": "bold green",
-                "assistant": "bold blue",
-                "tool": "bold yellow",
-            }.get(trace.role, "bold")
-
-            header = Text(f"[{trace.order_index}] {trace.role}", style=role_style)
-            content = trace.content
-            # Truncate very long content for display
-            if len(content) > 500:
-                content = content[:500] + f"\n… ({len(trace.content)} chars total)"
-
-            console.print(header)
-            console.print(content)
-            console.print()
-
-    # Optionally show tool calls
-    if show_tool_calls:
-        records = await store.get_tool_calls(run_id)
-        if not records:
-            console.print("[dim]No tool calls recorded.[/dim]")
+        # Fetch and display traces
+        traces = await store.get_traces(run_id)
+        if not traces:
+            console.print("[dim]No traces recorded.[/dim]")
         else:
-            table = Table(title="Tool Calls", show_lines=True)
-            table.add_column("Tool", style="bold")
-            table.add_column("Success", no_wrap=True)
-            table.add_column("Duration", justify="right")
-            table.add_column("Iter", justify="right")
-            table.add_column("Error")
+            console.print()
+            for trace in traces:
+                role_style = {
+                    "user": "bold green",
+                    "assistant": "bold blue",
+                    "tool": "bold yellow",
+                }.get(trace.role, "bold")
 
-            for r in records:
-                success_str = "[green]✓[/green]" if r.success else "[red]✗[/red]"
-                duration = f"{r.duration_ms}ms" if r.duration_ms else "—"
-                table.add_row(
-                    r.tool_name,
-                    success_str,
-                    duration,
-                    str(r.iteration_index) if r.iteration_index is not None else "—",
-                    r.error_message or "",
-                )
+                header = Text(f"[{trace.order_index}] {trace.role}", style=role_style)
+                content = trace.content
+                # Truncate very long content for display
+                if len(content) > 500:
+                    content = content[:500] + f"\n… ({len(trace.content)} chars total)"
 
-            console.print(table)
+                console.print(header)
+                console.print(content)
+                console.print()
+
+        # Optionally show tool calls
+        if show_tool_calls:
+            records = await store.get_tool_calls(run_id)
+            if not records:
+                console.print("[dim]No tool calls recorded.[/dim]")
+            else:
+                table = Table(title="Tool Calls", show_lines=True)
+                table.add_column("Tool", style="bold")
+                table.add_column("Success", no_wrap=True)
+                table.add_column("Duration", justify="right")
+                table.add_column("Iter", justify="right")
+                table.add_column("Error")
+
+                for r in records:
+                    success_str = "[green]✓[/green]" if r.success else "[red]✗[/red]"
+                    duration = f"{r.duration_ms}ms" if r.duration_ms else "—"
+                    table.add_row(
+                        r.tool_name,
+                        success_str,
+                        duration,
+                        str(r.iteration_index) if r.iteration_index is not None else "—",
+                        r.error_message or "",
+                    )
+
+                console.print(table)
+    finally:
+        await reset_engine()

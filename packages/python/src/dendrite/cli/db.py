@@ -13,12 +13,16 @@ app = typer.Typer(name="db", help="Database management commands.", no_args_is_he
 console = Console()
 
 
-def _build_alembic_config(url: str = "") -> Any:
+def _build_alembic_config() -> Any:
     """Build an Alembic Config programmatically.
 
     Works both from a repo checkout (finds alembic.ini) and from a
     pip-installed package (uses the migrations directory inside the
     dendrite.db.migrations package as the script_location).
+
+    Database URL is resolved from DENDRITE_DATABASE_URL env var, falling
+    back to async SQLite. CLI flags are intentionally not used for URLs
+    to avoid leaking credentials in shell history and process listings.
     """
     try:
         from alembic.config import Config
@@ -36,27 +40,26 @@ def _build_alembic_config(url: str = "") -> Any:
         migrations_dir = str(Path(__file__).resolve().parent.parent / "db" / "migrations")
         cfg.set_main_option("script_location", migrations_dir)
 
-    # Resolve database URL: explicit arg > env var > SQLite default
-    resolved_url = url or os.environ.get("DENDRITE_DATABASE_URL", "sqlite:///./dendrite.db")
+    # Resolve database URL from env var only (no CLI arg — security)
+    resolved_url = os.environ.get("DENDRITE_DATABASE_URL", "sqlite+aiosqlite:///./dendrite.db")
     cfg.set_main_option("sqlalchemy.url", resolved_url)
 
     return cfg
 
 
 @app.command()
-def migrate(
-    url: str = typer.Option(
-        "", "--url", "-u", help="Database URL. Falls back to DENDRITE_DATABASE_URL or SQLite."
-    ),
-) -> None:
-    """Run database migrations (alembic upgrade head)."""
+def migrate() -> None:
+    """Run database migrations (alembic upgrade head).
+
+    Set DENDRITE_DATABASE_URL to override the default SQLite path.
+    """
     try:
         from alembic import command
     except ImportError:
         console.print("[red]Alembic not installed.[/red] Run: pip install dendrite[db]")
         raise typer.Exit(1) from None
 
-    alembic_cfg = _build_alembic_config(url)
+    alembic_cfg = _build_alembic_config()
 
     console.print("[bold]Running migrations...[/bold]")
     try:
@@ -69,19 +72,18 @@ def migrate(
 
 
 @app.command()
-def status(
-    url: str = typer.Option(
-        "", "--url", "-u", help="Database URL. Falls back to DENDRITE_DATABASE_URL or SQLite."
-    ),
-) -> None:
-    """Show current migration revision."""
+def status() -> None:
+    """Show current migration revision.
+
+    Set DENDRITE_DATABASE_URL to override the default SQLite path.
+    """
     try:
         from alembic import command
     except ImportError:
         console.print("[red]Alembic not installed.[/red] Run: pip install dendrite[db]")
         raise typer.Exit(1) from None
 
-    alembic_cfg = _build_alembic_config(url)
+    alembic_cfg = _build_alembic_config()
     command.current(alembic_cfg, verbose=True)
 
 
