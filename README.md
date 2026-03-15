@@ -524,6 +524,12 @@ make ci
 
 ---
 
+## 🤖 Built with Claude Code
+
+Dendrite is built through AI pair programming using [Claude Code](https://claude.ai/code). Every commit is co-authored, every design decision discussed before implementation. We use a 5-layer doc architecture to keep the LLM aligned across conversations — vision docs describe the destination, the status map describes reality.
+
+---
+
 ## 📄 License
 
 [Apache 2.0](LICENSE)
