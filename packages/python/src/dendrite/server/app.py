@@ -16,9 +16,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from dendrite.server.auth import extract_bearer_token, generate_run_token, verify_run_token
 from dendrite.server.observer import CompositeObserver, ServerEvent, TransportObserver
 from dendrite.server.schemas import (
     CreateRunRequest,
@@ -33,10 +34,57 @@ from dendrite.server.tasks import RunTaskManager
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
     from dendrite.runtime.state import StateStore
     from dendrite.server.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
+
+# Header key to strip from log context — never log bearer tokens
+_AUTH_HEADER = "authorization"
+
+
+class _StripAuthHeaderMiddleware:
+    """Raw ASGI middleware that extracts and strips Authorization headers.
+
+    Operates directly on the ASGI scope BEFORE the Request object is
+    constructed, avoiding Starlette's lazy header cache problem
+    (BaseHTTPMiddleware would cache headers on first access, making
+    the stripped value still readable via request.headers).
+
+    The extracted value is stored in scope["state"]["_auth_header"]
+    so the auth dependency can read it via request.state._auth_header.
+
+    Always active — "never log tokens" is unconditional policy,
+    not tied to whether HMAC auth is enabled.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self._app(scope, receive, send)
+            return
+
+        raw_headers: list[tuple[bytes, bytes]] = scope.get("headers", [])
+        auth_value: str | None = None
+        filtered: list[tuple[bytes, bytes]] = []
+        auth_key = _AUTH_HEADER.encode()
+
+        for k, v in raw_headers:
+            if k == auth_key:
+                auth_value = v.decode("latin-1")
+            else:
+                filtered.append((k, v))
+
+        # Mutate scope BEFORE any Request object is created
+        scope["headers"] = filtered
+        # Store extracted value for the auth dependency
+        scope.setdefault("state", {})["_auth_header"] = auth_value
+
+        await self._app(scope, receive, send)
 
 
 def create_app(
@@ -44,27 +92,81 @@ def create_app(
     registry: AgentRegistry,
     *,
     hmac_secret: str | None = None,
+    allow_insecure_dev_mode: bool = False,
 ) -> FastAPI:
     """Create a mountable Dendrite FastAPI application.
 
     Args:
         state_store: Persistence backend for runs.
         registry: Agent configurations (HostedAgentConfig with factories).
-        hmac_secret: HMAC secret for run-scoped tokens. None = auth disabled.
+        hmac_secret: HMAC secret for run-scoped tokens. None = auth disabled
+            only if allow_insecure_dev_mode=True (fail-closed by default).
+        allow_insecure_dev_mode: When True and hmac_secret is None, auth is
+            disabled with a warning. When False (default) and hmac_secret is
+            None, startup fails.
     """
+    if hmac_secret is None and not allow_insecure_dev_mode:
+        raise ValueError(
+            "hmac_secret is required. Set DENDRITE_HMAC_SECRET or pass "
+            "allow_insecure_dev_mode=True for local development."
+        )
+    if hmac_secret is None:
+        logger.warning(
+            "DENDRITE_HMAC_SECRET not set — auth is DISABLED. Do not run this in production."
+        )
+
+    auth_enabled = hmac_secret is not None
     app = FastAPI(title="Dendrite", version="0.1.0a1")
+
+    # Strip Authorization header unconditionally — "never log tokens" is
+    # policy regardless of whether HMAC auth is enabled. Even in dev mode,
+    # a developer's frontend may send bearer tokens that should not leak.
+    app.add_middleware(_StripAuthHeaderMiddleware)
     task_manager = RunTaskManager()
     # Per-run SSE queues. Cleaned up by:
     # - _run_agent finally block (non-paused terminal runs)
     # - SSE generator finally block (after client consumes terminal event)
     # - DELETE /runs endpoint (cancelled runs)
-    # Edge case: paused runs abandoned without resume or cancel will leak.
-    # A TTL-based eviction (Sprint 4) would address this.
+    # - Resume endpoints (terminal completions after resume)
+    #
+    # Known limitations (Sprint 3):
+    # - Paused runs abandoned without resume or cancel will leak queues.
+    # - GET /events after terminal-event TTL expires returns an error event
+    #   (no DB-backed replay yet).
+    # Sprint 4: TTL eviction for abandoned queues + DB-backed terminal replay.
     sse_queues: dict[str, asyncio.Queue[ServerEvent]] = {}
+
+    def _require_run_token(request: Request, run_id: str) -> None:
+        """Verify run-scoped HMAC token. Raises HTTPException(401) on failure.
+
+        No-op when auth is disabled (dev mode).
+        Reads from request.state._auth_header (set by the raw ASGI
+        middleware before the Request object is constructed).
+        """
+        if not auth_enabled:
+            return
+        assert hmac_secret is not None  # narrowing for mypy
+        auth_header = getattr(request.state, "_auth_header", None)
+        token = extract_bearer_token(auth_header)
+        if token is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Missing Authorization: Bearer <token> header.",
+            )
+        if not verify_run_token(run_id, token, hmac_secret):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired token for this run.",
+            )
 
     @app.post("/runs", response_model=CreateRunResponse)
     async def create_run(req: CreateRunRequest) -> CreateRunResponse:
-        """Start a new agent run in a background task."""
+        """Start a new agent run in a background task.
+
+        Intentionally unauthenticated — the token doesn't exist until
+        the run is created. Access control for run creation is the
+        developer's Layer 1 responsibility (their auth middleware).
+        """
         try:
             config = registry.get(req.agent_name)
         except KeyError as e:
@@ -256,11 +358,15 @@ def create_app(
 
         task_manager.spawn(run_id, _run_agent())
 
-        return CreateRunResponse(run_id=run_id, status="running")
+        # Generate run-scoped token (None when auth is disabled)
+        token = generate_run_token(run_id, hmac_secret) if auth_enabled and hmac_secret else None
+
+        return CreateRunResponse(run_id=run_id, status="running", token=token)
 
     @app.get("/runs/{run_id}", response_model=RunStatusResponse)
-    async def get_run_status(run_id: str) -> RunStatusResponse:
+    async def get_run_status(run_id: str, request: Request) -> RunStatusResponse:
         """Poll the current status of a run."""
+        _require_run_token(request, run_id)
         record = await state_store.get_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
@@ -292,8 +398,9 @@ def create_app(
         )
 
     @app.get("/runs/{run_id}/events")
-    async def stream_events(run_id: str) -> StreamingResponse:
+    async def stream_events(run_id: str, request: Request) -> StreamingResponse:
         """SSE event stream for a run."""
+        _require_run_token(request, run_id)
         queue = sse_queues.get(run_id)
 
         async def _generate() -> AsyncGenerator[str, None]:
@@ -348,8 +455,11 @@ def create_app(
         )
 
     @app.post("/runs/{run_id}/tool-results", response_model=ResumeResponse)
-    async def submit_tool_results(run_id: str, req: SubmitToolResultsRequest) -> ResumeResponse:
+    async def submit_tool_results(
+        run_id: str, req: SubmitToolResultsRequest, request: Request
+    ) -> ResumeResponse:
         """Submit client tool results to resume a WAITING_CLIENT_TOOL run."""
+        _require_run_token(request, run_id)
         from dendrite.runtime.runner import resume as dendrite_resume
         from dendrite.types import ToolResult
 
@@ -411,8 +521,11 @@ def create_app(
             raise HTTPException(status_code=500, detail="Internal server error") from exc
 
     @app.post("/runs/{run_id}/input", response_model=ResumeResponse)
-    async def submit_input(run_id: str, req: SubmitInputRequest) -> ResumeResponse:
+    async def submit_input(
+        run_id: str, req: SubmitInputRequest, request: Request
+    ) -> ResumeResponse:
         """Submit clarification input to resume a WAITING_HUMAN_INPUT run."""
+        _require_run_token(request, run_id)
         from dendrite.runtime.runner import resume_with_input as dendrite_resume_input
 
         raw = await state_store.get_pause_state(run_id)
@@ -534,8 +647,9 @@ def create_app(
             logger.info("Run %s error not persisted (likely cancelled), skipping emit", run_id)
 
     @app.delete("/runs/{run_id}")
-    async def cancel_run(run_id: str) -> dict[str, str]:
+    async def cancel_run(run_id: str, request: Request) -> dict[str, str]:
         """Cancel a run. Works on paused/pending runs. Best-effort on running (D5)."""
+        _require_run_token(request, run_id)
         record = await state_store.get_run(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
