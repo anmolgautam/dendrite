@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine

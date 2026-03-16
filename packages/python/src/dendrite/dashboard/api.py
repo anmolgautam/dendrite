@@ -194,7 +194,9 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
 
     # Serve pre-built React dashboard (if static assets exist).
     # In development, Vite dev server handles this via proxy.
-    if _STATIC_DIR.is_dir():
+    # Check for index.html, not just the directory — .gitkeep keeps
+    # the dir in git but doesn't mean assets are built.
+    if (_STATIC_DIR / "index.html").is_file():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="dashboard")
 
     return app

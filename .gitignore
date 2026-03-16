@@ -50,6 +50,7 @@ htmlcov/
 *.db
 *.sqlite3
 
-# Dashboard (React build artifacts)
+# Dashboard (React build artifacts — keep dir via .gitkeep, ignore contents)
 node_modules/
-packages/python/src/dendrite/dashboard/static/
+packages/python/src/dendrite/dashboard/static/*
+!packages/python/src/dendrite/dashboard/static/.gitkeep
