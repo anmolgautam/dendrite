@@ -114,8 +114,8 @@ function LLMCallInspector({ node, runId, systemPrompt, iterMessages }: {
   systemPrompt?: string | null;
   iterMessages?: TraceMessage[];
 }) {
-  type ViewMode = "formatted" | "raw" | "evidence";
-  const [viewMode, setViewMode] = useState<ViewMode>("formatted");
+  type ViewMode = "semantic" | "provider";
+  const [viewMode, setViewMode] = useState<ViewMode>("semantic");
 
   // Fetch evidence layer data (llm_interactions)
   const { data: llmCallsData } = useQuery({
@@ -129,10 +129,6 @@ function LLMCallInspector({ node, runId, systemPrompt, iterMessages }: {
     (c) => c.iteration_index === node.iteration
   );
 
-  // Build the raw request/response payloads
-  const rawRequest = buildRawRequest(systemPrompt, iterMessages, node);
-  const rawResponse = buildRawResponse(node, iterMessages);
-
   return (
     <>
       {/* Stats */}
@@ -141,69 +137,88 @@ function LLMCallInspector({ node, runId, systemPrompt, iterMessages }: {
         <StatCard label="Output" value={formatTokens(node.output_tokens)} mono />
         {node.cost_usd != null && <StatCard label="Cost" value={formatCost(node.cost_usd)} mono />}
         {node.model && <StatCard label="Model" value={node.model} />}
+        {interaction?.duration_ms != null && <StatCard label="Latency" value={formatDuration(interaction.duration_ms)} mono />}
       </div>
 
-      {/* View mode selector */}
+      {/* Semantic / Provider toggle — same interaction, two views */}
       <div className="px-5 py-3 border-b border-white/[0.06] flex items-center justify-between">
-        <span className="text-xs text-text-muted">View mode</span>
+        <span className="text-xs text-text-muted">
+          {viewMode === "semantic" ? "Dendrite semantics" : "Vendor wire format"}
+        </span>
         <div className="flex gap-1.5">
-          <ViewModeButton active={viewMode === "formatted"} onClick={() => setViewMode("formatted")} icon="format_align_left" label="Formatted" />
-          <ViewModeButton active={viewMode === "raw"} onClick={() => setViewMode("raw")} icon="code" label="Raw JSON" />
-          <ViewModeButton
-            active={viewMode === "evidence"}
-            onClick={() => setViewMode("evidence")}
-            icon="policy"
-            label="Evidence"
-            badge={interaction != null}
-          />
+          <ToggleButton active={viewMode === "semantic"} onClick={() => setViewMode("semantic")} icon="neurology" label="Semantic" />
+          <ToggleButton active={viewMode === "provider"} onClick={() => setViewMode("provider")} icon="cloud" label="Provider" />
         </div>
       </div>
 
-      {viewMode === "raw" ? (
-        /* ---- RAW JSON VIEW ---- */
-        <>
-          <Section title="Request (sent to LLM)" icon="upload">
-            <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap text-text-secondary overflow-x-auto">
-              {JSON.stringify(rawRequest, null, 2)}
-            </pre>
-          </Section>
-          <Section title="Response (from LLM)" icon="download">
-            <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap text-text-secondary overflow-x-auto">
-              {JSON.stringify(rawResponse, null, 2)}
-            </pre>
-          </Section>
-        </>
-      ) : viewMode === "evidence" ? (
-        /* ---- EVIDENCE LAYER VIEW ---- */
-        <EvidenceLayerView interaction={interaction} />
-      ) : (
-        /* ---- FORMATTED VIEW ---- */
-        <>
-          {/* System Prompt */}
-          {systemPrompt && (
-            <Collapsible title="System Prompt" icon="psychology" defaultOpen={node.iteration === 1}>
-              <pre className="text-text-secondary font-mono text-xs whitespace-pre-wrap leading-relaxed">
-                {systemPrompt}
-              </pre>
+      {viewMode === "provider" ? (
+        /* ---- PROVIDER VIEW — exact vendor API payloads ---- */
+        interaction ? (
+          <>
+            <Collapsible title="Provider Request" icon="upload" defaultOpen>
+              {interaction.provider_request ? (
+                <JsonBlock data={interaction.provider_request} />
+              ) : (
+                <Empty text="Provider adapter does not emit request payloads" />
+              )}
             </Collapsible>
-          )}
-
-          {/* Message flow */}
-          {iterMessages && iterMessages.length > 0 && (
-            <Section title={`Message Flow — Iteration ${node.iteration}`} icon="forum">
-              <div className="space-y-4">
-                {iterMessages.map((msg, i) => <MessageBubble key={i} msg={msg} />)}
-              </div>
-            </Section>
-          )}
-
-          {/* Assistant response fallback */}
-          {node.assistant_text && (!iterMessages || iterMessages.length === 0) && (
-            <Section title="Assistant Response" icon="smart_toy">
-              <pre className="text-text-secondary font-mono text-xs whitespace-pre-wrap leading-relaxed">
-                {node.assistant_text}
-              </pre>
-            </Section>
+            <Collapsible title="Provider Response" icon="download" defaultOpen>
+              {interaction.provider_response ? (
+                <JsonBlock data={interaction.provider_response} />
+              ) : (
+                <Empty text="Provider adapter does not emit response payloads" />
+              )}
+            </Collapsible>
+          </>
+        ) : (
+          <div className="p-8 text-center">
+            <span className="material-symbols-outlined text-3xl text-white/10 mb-3 block">cloud_off</span>
+            <p className="text-text-muted text-sm">No provider payload data for this call.</p>
+            <p className="text-text-muted text-xs mt-1">Run the agent again to capture payloads.</p>
+          </div>
+        )
+      ) : (
+        /* ---- SEMANTIC VIEW — Dendrite's normalized payloads ---- */
+        <>
+          {/* Persisted semantic request (full-fidelity from llm_interactions) */}
+          {interaction?.semantic_request ? (
+            <>
+              <Collapsible title="Semantic Request" icon="upload" defaultOpen>
+                <JsonBlock data={interaction.semantic_request} />
+              </Collapsible>
+              <Collapsible title="Semantic Response" icon="download" defaultOpen>
+                {interaction.semantic_response ? (
+                  <JsonBlock data={interaction.semantic_response} />
+                ) : (
+                  <Empty text="No response data" />
+                )}
+              </Collapsible>
+            </>
+          ) : (
+            <>
+              {/* Fallback: render from traces when no evidence data exists (pre-3.5 runs) */}
+              {systemPrompt && (
+                <Collapsible title="System Prompt" icon="psychology" defaultOpen={node.iteration === 1}>
+                  <pre className="text-text-secondary font-mono text-xs whitespace-pre-wrap leading-relaxed">
+                    {systemPrompt}
+                  </pre>
+                </Collapsible>
+              )}
+              {iterMessages && iterMessages.length > 0 && (
+                <Section title={`Message Flow — Iteration ${node.iteration}`} icon="forum">
+                  <div className="space-y-4">
+                    {iterMessages.map((msg, i) => <MessageBubble key={i} msg={msg} />)}
+                  </div>
+                </Section>
+              )}
+              {node.assistant_text && (!iterMessages || iterMessages.length === 0) && (
+                <Section title="Assistant Response" icon="smart_toy">
+                  <pre className="text-text-secondary font-mono text-xs whitespace-pre-wrap leading-relaxed">
+                    {node.assistant_text}
+                  </pre>
+                </Section>
+              )}
+            </>
           )}
 
           {/* Tool calls indicator */}
@@ -219,18 +234,17 @@ function LLMCallInspector({ node, runId, systemPrompt, iterMessages }: {
   );
 }
 
-/** View mode toggle button. */
-function ViewModeButton({ active, onClick, icon, label, badge }: {
+/** Toggle button for Semantic / Provider view. */
+function ToggleButton({ active, onClick, icon, label }: {
   active: boolean;
   onClick: () => void;
   icon: string;
   label: string;
-  badge?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`relative flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+      className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
         active
           ? "bg-state-llm/15 text-state-llm border border-state-llm/30"
           : "bg-white/5 text-text-muted border border-white/10 hover:bg-white/10"
@@ -238,143 +252,8 @@ function ViewModeButton({ active, onClick, icon, label, badge }: {
     >
       <span className="material-symbols-outlined text-sm">{icon}</span>
       {label}
-      {badge && (
-        <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-state-llm" />
-      )}
     </button>
   );
-}
-
-/** Evidence layer view — shows semantic + provider payloads from llm_interactions table. */
-function EvidenceLayerView({ interaction }: { interaction?: LLMInteraction }) {
-  if (!interaction) {
-    return (
-      <div className="p-8 text-center">
-        <span className="material-symbols-outlined text-3xl text-white/10 mb-3 block">policy</span>
-        <p className="text-text-muted text-sm">No evidence data for this LLM call.</p>
-        <p className="text-text-muted text-xs mt-1">Run the agent again to capture payloads.</p>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      {/* Semantic Request — Dendrite's normalized view */}
-      <Collapsible title="Semantic Request (Dendrite)" icon="neurology" defaultOpen>
-        {interaction.semantic_request ? (
-          <JsonBlock data={interaction.semantic_request} />
-        ) : (
-          <Empty text="Not captured" />
-        )}
-      </Collapsible>
-
-      {/* Semantic Response — Dendrite's normalized response */}
-      <Collapsible title="Semantic Response (Dendrite)" icon="smart_toy" defaultOpen>
-        {interaction.semantic_response ? (
-          <JsonBlock data={interaction.semantic_response} />
-        ) : (
-          <Empty text="Not captured" />
-        )}
-      </Collapsible>
-
-      {/* Provider Request — exact vendor API payload */}
-      <Collapsible title="Provider Request (API)" icon="upload">
-        {interaction.provider_request ? (
-          <JsonBlock data={interaction.provider_request} />
-        ) : (
-          <Empty text="Not captured — provider adapter does not emit payloads yet" />
-        )}
-      </Collapsible>
-
-      {/* Provider Response — raw vendor response */}
-      <Collapsible title="Provider Response (API)" icon="download">
-        {interaction.provider_response ? (
-          <JsonBlock data={interaction.provider_response} />
-        ) : (
-          <Empty text="Not captured — provider adapter does not emit payloads yet" />
-        )}
-      </Collapsible>
-
-      {/* Metadata */}
-      <Section title="Interaction Metadata" icon="info">
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div>
-            <span className="text-text-muted">ID</span>
-            <p className="font-mono text-text-secondary">{interaction.id}</p>
-          </div>
-          <div>
-            <span className="text-text-muted">Iteration</span>
-            <p className="font-mono text-text-secondary">{interaction.iteration_index}</p>
-          </div>
-          <div>
-            <span className="text-text-muted">Model</span>
-            <p className="font-mono text-text-secondary">{interaction.model ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-text-muted">Provider</span>
-            <p className="font-mono text-text-secondary">{interaction.provider ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-text-muted">Tokens</span>
-            <p className="font-mono text-text-secondary">{interaction.input_tokens} in / {interaction.output_tokens} out</p>
-          </div>
-          <div>
-            <span className="text-text-muted">Cost</span>
-            <p className="font-mono text-text-secondary">{interaction.cost_usd != null ? `$${interaction.cost_usd.toFixed(4)}` : "—"}</p>
-          </div>
-        </div>
-      </Section>
-    </>
-  );
-}
-
-/** Build the raw request object as it would have been sent to the LLM. */
-function buildRawRequest(
-  systemPrompt: string | null | undefined,
-  iterMessages: TraceMessage[] | undefined,
-  node: LLMCallNode,
-): Record<string, unknown> {
-  const messages: Record<string, unknown>[] = [];
-
-  if (systemPrompt) {
-    messages.push({ role: "system", content: systemPrompt });
-  }
-
-  if (iterMessages) {
-    for (const msg of iterMessages) {
-      // Only include messages that went IN to the LLM (not the assistant response)
-      if (msg.role !== "assistant") {
-        messages.push({ role: msg.role, content: msg.content });
-      }
-    }
-  }
-
-  return {
-    model: node.model,
-    messages,
-    ...(node.has_tool_calls ? { tools: "(tool schemas — see agent definition)" } : {}),
-  };
-}
-
-/** Build the raw response object as returned by the LLM. */
-function buildRawResponse(
-  node: LLMCallNode,
-  iterMessages: TraceMessage[] | undefined,
-): Record<string, unknown> {
-  // Find the assistant message from this iteration
-  const assistantMsg = iterMessages?.find((m) => m.role === "assistant");
-
-  return {
-    role: "assistant",
-    content: assistantMsg?.content ?? node.assistant_text ?? null,
-    ...(node.has_tool_calls ? { tool_calls: "(see tool nodes below)" } : {}),
-    usage: {
-      input_tokens: node.input_tokens,
-      output_tokens: node.output_tokens,
-      total_tokens: node.input_tokens + node.output_tokens,
-    },
-    ...(node.cost_usd != null ? { cost_usd: node.cost_usd } : {}),
-  };
 }
 
 // -------------------------------------------------------------------

@@ -42,6 +42,32 @@ def _redact_dict(d: dict[str, Any], redact: Callable[[str], str]) -> dict[str, A
     return {k: _redact_value(v, redact) for k, v in d.items()}
 
 
+def _serialize_message(m: Message) -> dict[str, Any]:
+    """Full-fidelity serialization of a Message for the evidence layer.
+
+    Preserves role, content, tool_calls (with IDs and params), call_id,
+    name, and meta — everything needed to reconstruct the conversation.
+    """
+    d: dict[str, Any] = {"role": m.role.value, "content": m.content}
+    if m.tool_calls is not None:
+        d["tool_calls"] = [
+            {
+                "id": tc.id,
+                "provider_tool_call_id": tc.provider_tool_call_id,
+                "name": tc.name,
+                "params": tc.params,
+            }
+            for tc in m.tool_calls
+        ]
+    if m.call_id is not None:
+        d["call_id"] = m.call_id
+    if m.name is not None:
+        d["name"] = m.name
+    if m.meta:
+        d["meta"] = m.meta
+    return d
+
+
 class PersistenceObserver(LoopObserver):
     """Writes loop events to a StateStore for persistence.
 
@@ -147,30 +173,48 @@ class PersistenceObserver(LoopObserver):
         *,
         semantic_messages: list[Message] | None = None,
         semantic_tools: list[Any] | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         """Persist LLM interaction (primary) + token usage (legacy) and record event."""
-        # Build semantic payloads for the evidence layer
+        # Build semantic payloads — full-fidelity serialization of Dendrite types.
+        # These are the authoritative evidence records for debugging and audit.
         semantic_request = None
         if semantic_messages is not None:
             semantic_request = {
-                "messages": [
-                    {"role": m.role.value, "content": m.content[:2000]} for m in semantic_messages
-                ],
+                "messages": [_serialize_message(m) for m in semantic_messages],
             }
             if semantic_tools is not None:
                 semantic_request["tools"] = [
-                    {"name": t.name, "description": t.description} for t in semantic_tools
+                    {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                        "target": getattr(t, "target", "server"),
+                    }
+                    for t in semantic_tools
                 ]
 
         semantic_response: dict[str, Any] | None = None
         if response.text is not None or response.tool_calls is not None:
             semantic_response = {}
             if response.text is not None:
-                semantic_response["text"] = response.text[:2000]
+                semantic_response["text"] = response.text
             if response.tool_calls is not None:
                 semantic_response["tool_calls"] = [
-                    {"name": tc.name, "params": tc.params} for tc in response.tool_calls
+                    {
+                        "id": tc.id,
+                        "provider_tool_call_id": tc.provider_tool_call_id,
+                        "name": tc.name,
+                        "params": tc.params,
+                    }
+                    for tc in response.tool_calls
                 ]
+            semantic_response["usage"] = {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.total_tokens,
+                "cost_usd": response.usage.cost_usd,
+            }
 
         # Primary write: llm_interactions table
         try:
@@ -180,6 +224,7 @@ class PersistenceObserver(LoopObserver):
                 usage=response.usage,
                 model=self._model,
                 provider=self._provider_name,
+                duration_ms=duration_ms,
                 semantic_request=semantic_request,
                 semantic_response=semantic_response,
                 provider_request=response.provider_request,

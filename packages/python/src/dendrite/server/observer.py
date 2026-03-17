@@ -44,6 +44,7 @@ class CompositeObserver(LoopObserver):
         *,
         semantic_messages: list[Message] | None = None,
         semantic_tools: Any | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         for obs in self._observers:
             try:
@@ -52,6 +53,7 @@ class CompositeObserver(LoopObserver):
                     iteration,
                     semantic_messages=semantic_messages,
                     semantic_tools=semantic_tools,
+                    duration_ms=duration_ms,
                 )
             except Exception:
                 logger.warning("CompositeObserver: on_llm_call_completed failed", exc_info=True)
@@ -104,6 +106,7 @@ class TransportObserver(LoopObserver):
         *,
         semantic_messages: list[Message] | None = None,
         semantic_tools: Any | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         await self._queue.put(
             ServerEvent(

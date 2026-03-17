@@ -110,16 +110,23 @@ class TestObserverLLMInteraction:
         assert rec["iteration_index"] == 2
         assert rec["usage"].input_tokens == 100
 
-    async def test_semantic_request_captured(self) -> None:
-        """When semantic_messages and semantic_tools are passed, they're serialized."""
+    async def test_semantic_request_full_fidelity(self) -> None:
+        """Semantic request preserves full Message structure and ToolDef schemas."""
         store = MockStateStore()
         obs = PersistenceObserver(store, "run_1")
 
+        tc = ToolCall(name="add", params={"a": 1}, provider_tool_call_id="p1")
         messages = [
             Message(role=Role.USER, content="What is 2+2?"),
+            Message(role=Role.ASSISTANT, content="Calling add", tool_calls=[tc]),
+            Message(role=Role.TOOL, content='{"result": 3}', call_id=tc.id, name="add"),
         ]
         tools = [
-            ToolDef(name="add", description="Add numbers", parameters={}),
+            ToolDef(
+                name="add",
+                description="Add numbers",
+                parameters={"type": "object", "properties": {"a": {"type": "integer"}}},
+            ),
         ]
         response = LLMResponse(text="4", usage=UsageStats())
 
@@ -130,27 +137,49 @@ class TestObserverLLMInteraction:
         rec = store.llm_interactions[0]
         sr = rec["semantic_request"]
         assert sr is not None
-        assert len(sr["messages"]) == 1
-        assert sr["messages"][0]["role"] == "user"
-        assert sr["tools"][0]["name"] == "add"
 
-    async def test_semantic_response_captured(self) -> None:
+        # Messages preserve full structure
+        assert len(sr["messages"]) == 3
+        assert sr["messages"][0]["role"] == "user"
+        assert sr["messages"][0]["content"] == "What is 2+2?"
+        # Assistant message has tool_calls with IDs
+        assert sr["messages"][1]["tool_calls"][0]["name"] == "add"
+        assert sr["messages"][1]["tool_calls"][0]["provider_tool_call_id"] == "p1"
+        # Tool message has call_id and name
+        assert sr["messages"][2]["call_id"] == tc.id
+        assert sr["messages"][2]["name"] == "add"
+
+        # Tools preserve full schema
+        assert sr["tools"][0]["name"] == "add"
+        assert sr["tools"][0]["parameters"]["type"] == "object"
+        assert sr["tools"][0]["target"] == "server"
+
+    async def test_semantic_response_full_fidelity(self) -> None:
+        """Semantic response preserves full text, tool_calls with IDs, and usage."""
         store = MockStateStore()
         obs = PersistenceObserver(store, "run_1")
 
-        tc = ToolCall(name="add", params={"a": 1, "b": 2})
+        tc = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="ptc_1")
         response = LLMResponse(
             text="Let me add those",
             tool_calls=[tc],
-            usage=UsageStats(),
+            usage=UsageStats(input_tokens=50, output_tokens=20, total_tokens=70, cost_usd=0.001),
         )
         await obs.on_llm_call_completed(response, iteration=1)
 
         rec = store.llm_interactions[0]
         sr = rec["semantic_response"]
         assert sr is not None
-        assert "Let me add" in sr["text"]
+        # Full text, not truncated
+        assert sr["text"] == "Let me add those"
+        # Tool calls with IDs and params
         assert sr["tool_calls"][0]["name"] == "add"
+        assert sr["tool_calls"][0]["id"] == tc.id
+        assert sr["tool_calls"][0]["provider_tool_call_id"] == "ptc_1"
+        assert sr["tool_calls"][0]["params"] == {"a": 1, "b": 2}
+        # Usage included in semantic response
+        assert sr["usage"]["input_tokens"] == 50
+        assert sr["usage"]["cost_usd"] == 0.001
 
     async def test_provider_payloads_passed_through(self) -> None:
         """provider_request and provider_response from LLMResponse are stored."""
@@ -168,6 +197,17 @@ class TestObserverLLMInteraction:
         rec = store.llm_interactions[0]
         assert rec["provider_request"]["model"] == "claude-sonnet-4-6"
         assert rec["provider_response"]["id"] == "msg_abc"
+
+    async def test_duration_ms_passed_through(self) -> None:
+        """duration_ms kwarg flows from loop → observer → save_llm_interaction."""
+        store = MockStateStore()
+        obs = PersistenceObserver(store, "run_1")
+
+        response = LLMResponse(text="hi", usage=UsageStats())
+        await obs.on_llm_call_completed(response, iteration=1, duration_ms=1420)
+
+        rec = store.llm_interactions[0]
+        assert rec["duration_ms"] == 1420
 
     async def test_no_semantic_payloads_when_not_provided(self) -> None:
         """When called without semantic args (backcompat), payloads are None."""

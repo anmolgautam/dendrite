@@ -81,6 +81,7 @@ async def _notify_llm(
     *,
     semantic_messages: list[Message] | None = None,
     semantic_tools: list[ToolDef] | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     """Notify observer of an LLM call completion, swallowing exceptions."""
     if observer is None:
@@ -91,6 +92,7 @@ async def _notify_llm(
             iteration,
             semantic_messages=semantic_messages,
             semantic_tools=semantic_tools,
+            duration_ms=duration_ms,
         )
     except Exception:
         logger.warning("Observer.on_llm_call_completed failed", exc_info=True)
@@ -181,7 +183,9 @@ class ReActLoop(Loop):
             )
 
             # 2. Call the LLM
+            t0 = time.monotonic()
             response = await provider.complete(messages, tools=tools)
+            llm_duration_ms = int((time.monotonic() - t0) * 1000)
             await _notify_llm(
                 observer,
                 response,
@@ -189,6 +193,7 @@ class ReActLoop(Loop):
                 observer_warnings,
                 semantic_messages=messages,
                 semantic_tools=tools,
+                duration_ms=llm_duration_ms,
             )
 
             # Accumulate usage

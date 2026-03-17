@@ -1,6 +1,6 @@
 /** Run Detail — the hero page. Timeline left, inspector right. Responsive. */
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { fetchRunDetail } from "@/lib/api";
@@ -15,12 +15,7 @@ export function RunDetail() {
   const { runId } = useParams<{ runId: string }>();
   const clearSelection = useDashboardStore((s) => s.clearSelection);
   const selectedNode = useDashboardStore((s) => s.selectedNode);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-
-  // Open inspector when a node is selected
-  useEffect(() => {
-    if (selectedNode) setInspectorOpen(true);
-  }, [selectedNode]);
+  const inspectorOpen = selectedNode != null;
 
   // Clear selection on mount/unmount
   useEffect(() => {
@@ -31,10 +26,7 @@ export function RunDetail() {
   // Keyboard: Escape closes inspector
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        clearSelection();
-        setInspectorOpen(false);
-      }
+      if (e.key === "Escape") clearSelection();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -81,10 +73,7 @@ export function RunDetail() {
               runId={runId!}
               messages={data.messages_by_iteration}
               systemPrompt={data.system_prompt}
-              onClose={() => {
-                clearSelection();
-                setInspectorOpen(false);
-              }}
+              onClose={clearSelection}
             />
           </aside>
         )}

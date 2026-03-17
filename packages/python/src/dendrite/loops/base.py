@@ -64,6 +64,7 @@ class LoopObserver(Protocol):
         *,
         semantic_messages: list[Message] | None = None,
         semantic_tools: list[Any] | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         """Called after provider.complete() returns.
 
@@ -71,6 +72,9 @@ class LoopObserver(Protocol):
         payloads (the Dendrite-normalized messages and tool defs sent
         to the LLM). Provider-level payloads are on response itself
         (response.provider_request, response.provider_response).
+
+        Args:
+            duration_ms: Wall-clock time for the provider.complete() call.
 
         Maps to: llm_interactions table (primary), token_usage (legacy dual-write).
         """
