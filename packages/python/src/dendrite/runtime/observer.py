@@ -94,6 +94,7 @@ class PersistenceObserver(LoopObserver):
         redact: Callable[[str], str] | None = None,
         initial_order_index: int = 0,
         event_sequencer: Any | None = None,
+        lease_nonce: str | None = None,
     ) -> None:
         self._store = state_store
         self._run_id = run_id
@@ -105,6 +106,9 @@ class PersistenceObserver(LoopObserver):
         # Shared sequencer from runner — guarantees globally monotonic
         # sequence_index across runner-level and observer-level events.
         self._event_sequencer = event_sequencer
+        # Sprint 4: lease nonce for guarded writes. When set, all persistence
+        # writes are nonce-guarded — stale executor writes are silently rejected.
+        self._lease_nonce = lease_nonce
 
     async def _emit_event(
         self,
@@ -123,6 +127,7 @@ class PersistenceObserver(LoopObserver):
                 iteration_index=iteration,
                 correlation_id=correlation_id,
                 data=data,
+                lease_nonce=self._lease_nonce,
             )
         except Exception:
             logger.warning(
@@ -163,6 +168,7 @@ class PersistenceObserver(LoopObserver):
             content,
             order_index=self._order_index,
             meta=meta,
+            lease_nonce=self._lease_nonce,
         )
         self._order_index += 1
 
@@ -229,6 +235,7 @@ class PersistenceObserver(LoopObserver):
                 semantic_response=semantic_response,
                 provider_request=response.provider_request,
                 provider_response=response.provider_response,
+                lease_nonce=self._lease_nonce,
             )
         except Exception:
             logger.warning(
@@ -245,6 +252,7 @@ class PersistenceObserver(LoopObserver):
             usage=response.usage,
             model=self._model,
             provider=self._provider_name,
+            lease_nonce=self._lease_nonce,
         )
 
         # Durable event for dashboard timeline
@@ -287,6 +295,7 @@ class PersistenceObserver(LoopObserver):
             duration_ms=tool_result.duration_ms,
             iteration_index=iteration,
             error_message=redacted_error,
+            lease_nonce=self._lease_nonce,
         )
 
         # Durable event for dashboard timeline

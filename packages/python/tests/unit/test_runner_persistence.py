@@ -46,8 +46,18 @@ class RecordingStateStore:
     async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
         self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
 
+    async def claim_run(self, run_id: str, executor_id: str) -> str | None:
+        return "test-nonce"  # Always succeeds in test mock
+
+    async def renew_heartbeat(self, run_id: str, lease_nonce: str) -> bool:
+        return True
+
+    async def release_lease(self, run_id: str, lease_nonce: str) -> None:
+        pass
+
     async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
         kwargs.pop("expected_current_status", None)
+        kwargs.pop("lease_nonce", None)
         self.finalized_runs.append({"run_id": run_id, **kwargs})
         return True
 
@@ -59,6 +69,9 @@ class RecordingStateStore:
 
     async def save_usage(self, run_id: str, **kwargs: Any) -> None:
         self.usages.append({"run_id": run_id, **kwargs})
+
+    async def save_llm_interaction(self, run_id: str, **kwargs: Any) -> None:
+        pass
 
     async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
         self._events.setdefault(run_id, []).append(kwargs)

@@ -59,8 +59,6 @@ class TestClaimRun:
     async def test_claim_pending_run_succeeds(self, store) -> None:
         """Claiming a pending run returns a nonce."""
         await store.create_run("run_1", "Agent")
-        # create_run sets status=running, so set to pending first
-        await _set_status(store, "run_1", "pending")
 
         nonce = await store.claim_run("run_1", "executor-abc")
         assert nonce is not None
@@ -68,7 +66,6 @@ class TestClaimRun:
 
     async def test_claim_sets_executor_and_heartbeat(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
 
         nonce = await store.claim_run("run_1", "executor-abc")
 
@@ -82,7 +79,6 @@ class TestClaimRun:
     async def test_double_claim_fails(self, store) -> None:
         """Second claim on same run returns None (invariant 1)."""
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
 
         nonce1 = await store.claim_run("run_1", "executor-A")
         assert nonce1 is not None
@@ -93,10 +89,13 @@ class TestClaimRun:
     async def test_claim_non_pending_fails(self, store) -> None:
         """Cannot claim a run that isn't pending."""
         await store.create_run("run_1", "Agent")
-        # status is 'running' from create_run
+        # create_run sets pending; claim it first, then try again
+        nonce = await store.claim_run("run_1", "executor-A")
+        assert nonce is not None  # first claim succeeds (pending → running)
 
-        nonce = await store.claim_run("run_1", "executor-abc")
-        assert nonce is None
+        # Now it's running — a second claim_run should fail
+        nonce2 = await store.claim_run("run_1", "executor-B")
+        assert nonce2 is None
 
 
 # ------------------------------------------------------------------
@@ -108,7 +107,6 @@ class TestLeaseNonce:
     async def test_each_claim_generates_unique_nonce(self, store) -> None:
         """Reclaimed runs get a new nonce."""
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
 
         nonce1 = await store.claim_run("run_1", "executor-A")
 
@@ -129,7 +127,6 @@ class TestLeaseNonce:
 class TestNonceGuardedWrites:
     async def test_save_trace_with_valid_nonce(self, store) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         await store.save_trace("run_1", "user", "hello", order_index=0, lease_nonce=nonce)
@@ -139,7 +136,6 @@ class TestNonceGuardedWrites:
     async def test_save_trace_with_stale_nonce_rejected(self, store) -> None:
         """Stale executor's write is silently skipped (invariant 3)."""
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         old_nonce = await store.claim_run("run_1", "executor-A")
 
         # Supersede the lease
@@ -162,7 +158,6 @@ class TestNonceGuardedWrites:
     async def test_finalize_with_stale_nonce_rejected(self, store) -> None:
         """Stale executor's finalize is rejected (invariant 3)."""
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         old_nonce = await store.claim_run("run_1", "executor-A")
 
         # Supersede
@@ -182,7 +177,6 @@ class TestNonceGuardedWrites:
 
     async def test_finalize_with_valid_nonce_succeeds(self, store) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         won = await store.finalize_run(
@@ -198,7 +192,6 @@ class TestNonceGuardedWrites:
 
     async def test_save_usage_with_stale_nonce_rejected(self, store) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         old_nonce = await store.claim_run("run_1", "executor-A")
 
         await store.release_lease("run_1", old_nonce)
@@ -222,7 +215,6 @@ class TestNonceGuardedWrites:
 class TestStaleDetection:
     async def test_find_stale_runs(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         await store.claim_run("run_1", "executor-A")
 
         # Backdate heartbeat to make it stale
@@ -241,7 +233,6 @@ class TestStaleDetection:
 
     async def test_fresh_run_not_stale(self, store) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         await store.claim_run("run_1", "executor-A")
 
         stale = await store.find_stale_runs(threshold_seconds=60)
@@ -299,7 +290,6 @@ class TestTerminalNotReclaimable:
 class TestLeaseClearedOnExit:
     async def test_finalize_clears_lease(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         await store.finalize_run(
@@ -318,7 +308,6 @@ class TestLeaseClearedOnExit:
 
     async def test_pause_clears_lease(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         await store.pause_run(
@@ -337,7 +326,6 @@ class TestLeaseClearedOnExit:
 
     async def test_release_lease_clears_state(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         await store.release_lease("run_1", nonce)
@@ -357,7 +345,6 @@ class TestLeaseClearedOnExit:
 class TestHeartbeat:
     async def test_renew_with_valid_nonce(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         nonce = await store.claim_run("run_1", "executor-A")
 
         # Record initial heartbeat
@@ -375,7 +362,6 @@ class TestHeartbeat:
 
     async def test_renew_with_stale_nonce_fails(self, store) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         old_nonce = await store.claim_run("run_1", "executor-A")
 
         await store.release_lease("run_1", old_nonce)
@@ -394,7 +380,6 @@ class TestHeartbeat:
 class TestReclaim:
     async def test_reclaim_increments_retry(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         await store.claim_run("run_1", "executor-A")
 
         result = await store.reclaim_stale_run("run_1")
@@ -408,7 +393,6 @@ class TestReclaim:
 
     async def test_reclaim_exhausted_retries_marks_error(self, store, session_factory) -> None:
         await store.create_run("run_1", "Agent")
-        await _set_status(store, "run_1", "pending")
         await store.claim_run("run_1", "executor-A")
 
         # Set retry_count to max

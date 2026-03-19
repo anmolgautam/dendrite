@@ -72,10 +72,29 @@ class RecordingStateStore:
 
     async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
         self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
+        self._run_status[run_id] = "pending"
+
+    async def claim_run(self, run_id: str, executor_id: str) -> str | None:
+        if self._run_status.get(run_id) != "pending":
+            return None
         self._run_status[run_id] = "running"
+        return "test-nonce"
+
+    async def renew_heartbeat(self, run_id: str, lease_nonce: str) -> bool:
+        return True
+
+    async def release_lease(self, run_id: str, lease_nonce: str) -> None:
+        pass
 
     async def save_trace(
-        self, run_id: str, role: str, content: str, *, order_index: int, meta: Any = None
+        self,
+        run_id: str,
+        role: str,
+        content: str,
+        *,
+        order_index: int,
+        meta: Any = None,
+        **kwargs: Any,
     ) -> None:
         self.traces.append(
             {
@@ -93,8 +112,15 @@ class RecordingStateStore:
     async def save_usage(self, run_id: str, **kwargs: Any) -> None:
         self.usages.append({"run_id": run_id, **kwargs})
 
+    async def save_llm_interaction(self, run_id: str, **kwargs: Any) -> None:
+        pass
+
+    async def get_llm_interactions(self, run_id: str) -> list[Any]:
+        return []
+
     async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
         expected = kwargs.pop("expected_current_status", None)
+        kwargs.pop("lease_nonce", None)
         if expected is not None and self._run_status.get(run_id) != expected:
             return False
         self.finalized_runs.append({"run_id": run_id, **kwargs})
@@ -103,47 +129,74 @@ class RecordingStateStore:
         return True
 
     async def pause_run(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        pause_data: dict[str, Any],
-        iteration_count: int | None = None,
-    ) -> None:
+        self, run_id: str, *, status: str, pause_data: dict[str, Any], **kwargs: Any
+    ) -> bool:
         self.paused_runs.append(
             {
                 "run_id": run_id,
                 "status": status,
                 "pause_data": pause_data,
-                "iteration_count": iteration_count,
+                "iteration_count": kwargs.get("iteration_count"),
             }
         )
         self._pause_data[run_id] = pause_data
         self._run_status[run_id] = status
+        return True
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         return self._pause_data.get(run_id)
 
-    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
+    async def claim_paused_run(
+        self, run_id: str, *, expected_status: str, **kwargs: Any
+    ) -> str | None:
         if self._run_status.get(run_id) != expected_status:
-            return False
+            return None
         if run_id in self._claimed:
-            return False
+            return None
         self._claimed.add(run_id)
         self._run_status[run_id] = "running"
-        return True
+        return "resume-nonce"
 
     async def get_run(self, run_id: str) -> Any:
-        return None
+        if run_id not in self._run_status:
+            return None
+
+        @dataclass
+        class _Record:
+            id: str
+            agent_name: str
+            status: str
+            iteration_count: int = 0
+            retry_count: int = 0
+
+        return _Record(
+            id=run_id,
+            agent_name="Agent",
+            status=self._run_status[run_id],
+        )
 
     async def get_traces(self, run_id: str) -> list[Any]:
-        """Return trace records for order_index calculation."""
+        """Return trace records with full fields for recovery."""
 
         @dataclass
         class _Trace:
+            role: str
+            content: str
             order_index: int
+            meta: dict[str, Any] | None = None
+            created_at: Any = None
+            id: str = ""
 
-        return [_Trace(order_index=t["order_index"]) for t in self.traces if t["run_id"] == run_id]
+        return [
+            _Trace(
+                role=t["role"],
+                content=t["content"],
+                order_index=t["order_index"],
+                meta=t.get("meta"),
+            )
+            for t in self.traces
+            if t["run_id"] == run_id
+        ]
 
     async def get_tool_calls(self, run_id: str) -> list[Any]:
         return []
@@ -421,13 +474,13 @@ class TestResume:
         llm = MockLLM([LLMResponse(tool_calls=[tc])])
         r = await run(agent, provider=llm, user_input="Go", state_store=store)
 
-        # First claim succeeds
-        claimed1 = await store.claim_paused_run(r.run_id, expected_status="waiting_client_tool")
-        assert claimed1 is True
+        # First claim succeeds (returns nonce)
+        nonce1 = await store.claim_paused_run(r.run_id, expected_status="waiting_client_tool")
+        assert nonce1 is not None
 
         # Second claim fails (already claimed)
-        claimed2 = await store.claim_paused_run(r.run_id, expected_status="waiting_client_tool")
-        assert claimed2 is False
+        nonce2 = await store.claim_paused_run(r.run_id, expected_status="waiting_client_tool")
+        assert nonce2 is None
 
     async def test_pause_data_cleared_on_finalize(self) -> None:
         """pause_data is removed from store after successful finalize."""
@@ -565,6 +618,139 @@ class TestResumeWithInput:
             await resume_with_input(
                 r.run_id,
                 "some input",
+                state_store=store,
+                agent=agent,
+                provider=MockLLM([]),
+            )
+
+
+# ------------------------------------------------------------------
+# recover_run (Sprint 4 G3)
+# ------------------------------------------------------------------
+
+
+class TestRecoverRun:
+    async def test_recover_from_traces(self) -> None:
+        """Recover a stale run from persisted traces."""
+        from dendrite.runtime.runner import recover_run
+
+        agent = _make_agent(tools=[server_add])
+        store = RecordingStateStore()
+
+        # Simulate: run was created, partially executed, then crashed
+        # Step 1: Create run (pending), claim it, add some traces
+        run_id = "recover_test_1"
+        await store.create_run(run_id, agent.name)
+        await store.claim_run(run_id, "executor-A")
+        # Add a user message trace
+        await store.save_trace(run_id, "user", "What is 2+2?", order_index=0, meta={"iteration": 0})
+        # Simulate crash: status back to pending (sweeper reclaimed)
+        store._run_status[run_id] = "pending"
+        store._claimed.discard(run_id)
+
+        # Now recover — LLM will answer "4"
+        llm = MockLLM([LLMResponse(text="4")])
+        result = await recover_run(
+            run_id,
+            state_store=store,
+            agent=agent,
+            provider=llm,
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "4"
+        assert len(store.finalized_runs) == 1
+
+    async def test_recover_with_tool_call_traces(self) -> None:
+        """Recovery correctly reconstructs assistant messages with tool_calls."""
+        from dendrite.runtime.runner import recover_run
+
+        agent = _make_agent(tools=[server_add])
+        store = RecordingStateStore()
+
+        run_id = "recover_tc_1"
+        await store.create_run(run_id, agent.name)
+        await store.claim_run(run_id, "executor-A")
+
+        # User message
+        await store.save_trace(run_id, "user", "What is 2+2?", order_index=0, meta={"iteration": 0})
+        # Assistant message with tool_calls in meta (as PersistenceObserver writes it)
+        await store.save_trace(
+            run_id,
+            "assistant",
+            "Let me add those.",
+            order_index=1,
+            meta={
+                "iteration": 1,
+                "tool_calls": [
+                    {
+                        "id": "tc_001",
+                        "provider_tool_call_id": "ptc_001",
+                        "name": "server_add",
+                        "params": {"a": 2, "b": 2},
+                    }
+                ],
+            },
+        )
+        # Tool result message
+        await store.save_trace(
+            run_id,
+            "tool",
+            '{"result": 4}',
+            order_index=2,
+            meta={"iteration": 1, "call_id": "tc_001", "tool_name": "server_add"},
+        )
+
+        # Simulate crash → reclaim
+        store._run_status[run_id] = "pending"
+        store._claimed.discard(run_id)
+
+        # Recover — LLM sees the full history and gives final answer
+        llm = MockLLM([LLMResponse(text="The answer is 4")])
+        result = await recover_run(
+            run_id,
+            state_store=store,
+            agent=agent,
+            provider=llm,
+        )
+
+        assert result.status == RunStatus.SUCCESS
+        assert result.answer == "The answer is 4"
+
+        # Verify the LLM saw 3 messages (user + assistant with tool_calls + tool result)
+        assert len(llm.call_history) == 1
+        # The strategy builds messages from history — if tool_calls were lost,
+        # the Anthropic conversion would fail. Success proves reconstruction worked.
+
+    async def test_recover_non_pending_fails(self) -> None:
+        """Cannot recover a run that isn't pending."""
+        from dendrite.runtime.runner import recover_run
+
+        agent = _make_agent(tools=[server_add])
+        store = RecordingStateStore()
+        run_id = "recover_test_2"
+        await store.create_run(run_id, agent.name)
+        # Claim it so it's running, not pending
+        await store.claim_run(run_id, "executor-A")
+
+        with pytest.raises(ValueError, match="only pending"):
+            await recover_run(
+                run_id,
+                state_store=store,
+                agent=agent,
+                provider=MockLLM([]),
+            )
+
+    async def test_recover_nonexistent_fails(self) -> None:
+        """Cannot recover a run that doesn't exist."""
+        from dendrite.runtime.runner import recover_run
+
+        agent = _make_agent(tools=[server_add])
+        store = RecordingStateStore()
+
+        with pytest.raises(ValueError, match="not found"):
+            await recover_run(
+                "nonexistent",
                 state_store=store,
                 agent=agent,
                 provider=MockLLM([]),

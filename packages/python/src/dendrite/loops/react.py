@@ -147,6 +147,7 @@ class ReActLoop(Loop):
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
         initial_usage: UsageStats | None = None,
+        abort_check: Callable[..., bool] | None = None,
     ) -> RunResult:
         """Execute the ReAct loop, optionally resuming from a pause."""
         resolved_run_id = run_id or generate_ulid()
@@ -175,6 +176,21 @@ class ReActLoop(Loop):
         start_iteration = iteration_offset + 1
         end_iteration = agent.max_iterations + 1
         for iteration in range(start_iteration, end_iteration):
+            # 0. Check abort (e.g. lease superseded)
+            if abort_check is not None and abort_check():
+                abort_meta: dict[str, Any] = {}
+                if observer_warnings:
+                    abort_meta["observer_warnings"] = observer_warnings
+                abort_meta["abort_reason"] = "abort_check"
+                return RunResult(
+                    run_id=resolved_run_id,
+                    status=RunStatus.CANCELLED,
+                    steps=steps,
+                    iteration_count=iteration - 1,
+                    usage=total_usage,
+                    meta=abort_meta,
+                )
+
             # 1. Build messages via strategy
             messages, tools = strategy.build_messages(
                 system_prompt=agent.prompt,
@@ -292,6 +308,20 @@ class ReActLoop(Loop):
                         server_calls.append(tc)
                     else:
                         pending_calls.append(tc)
+
+                # Check abort before server-tool execution
+                if abort_check is not None and abort_check():
+                    abort_meta2: dict[str, Any] = {"abort_reason": "abort_check"}
+                    if observer_warnings:
+                        abort_meta2["observer_warnings"] = observer_warnings
+                    return RunResult(
+                        run_id=resolved_run_id,
+                        status=RunStatus.CANCELLED,
+                        steps=steps,
+                        iteration_count=iteration,
+                        usage=total_usage,
+                        meta=abort_meta2,
+                    )
 
                 # Execute server tools immediately
                 for tc in server_calls:

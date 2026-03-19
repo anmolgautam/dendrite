@@ -68,7 +68,7 @@ class MockServerStore:
         self._runs[run_id] = {
             "id": run_id,
             "agent_name": agent_name,
-            "status": "running",
+            "status": "pending",
             "iteration_count": 0,
             "answer": None,
             "error": None,
@@ -88,6 +88,19 @@ class MockServerStore:
             **kwargs,
         }
 
+    async def claim_run(self, run_id: str, executor_id: str) -> str | None:
+        run = self._runs.get(run_id)
+        if run and run["status"] == "pending":
+            run["status"] = "running"
+            return "test-nonce"
+        return None
+
+    async def renew_heartbeat(self, run_id: str, lease_nonce: str) -> bool:
+        return True
+
+    async def release_lease(self, run_id: str, lease_nonce: str) -> None:
+        pass
+
     async def save_trace(self, run_id: str, role: str, content: str, **kwargs: Any) -> None:
         self._traces.setdefault(run_id, []).append({"role": role, "content": content, **kwargs})
 
@@ -95,6 +108,9 @@ class MockServerStore:
         pass
 
     async def save_usage(self, run_id: str, **kwargs: Any) -> None:
+        pass
+
+    async def save_llm_interaction(self, run_id: str, **kwargs: Any) -> None:
         pass
 
     async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
@@ -112,20 +128,23 @@ class MockServerStore:
             self._pause_data.pop(run_id, None)
         return True
 
-    async def pause_run(self, run_id: str, *, status: str, pause_data: dict, **kwargs: Any) -> None:
+    async def pause_run(self, run_id: str, *, status: str, pause_data: dict, **kwargs: Any) -> bool:
         if run_id in self._runs:
             self._runs[run_id]["status"] = status
         self._pause_data[run_id] = pause_data
+        return True
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         return self._pause_data.get(run_id)
 
-    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
+    async def claim_paused_run(
+        self, run_id: str, *, expected_status: str, **kwargs: Any
+    ) -> str | None:
         run = self._runs.get(run_id)
         if run and run["status"] == expected_status:
             run["status"] = "running"
-            return True
-        return False
+            return "resume-nonce"
+        return None
 
     async def get_run(self, run_id: str) -> Any:
         run = self._runs.get(run_id)

@@ -19,6 +19,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from dendrite.agent import Agent
     from dendrite.llm.base import LLMProvider
     from dendrite.strategies.base import Strategy
@@ -116,6 +118,7 @@ class Loop(ABC):
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
         initial_usage: UsageStats | None = None,
+        abort_check: Callable[[], bool] | None = None,
     ) -> RunResult:
         """Execute the agent loop until completion.
 
@@ -135,6 +138,9 @@ class Loop(ABC):
             iteration_offset: Iteration number to resume from. The loop
                 starts counting from iteration_offset + 1.
             initial_usage: Cumulative token usage from before a pause.
+            abort_check: Optional callable returning True if execution
+                should be aborted (e.g. lease superseded). Checked between
+                iterations. When triggered, loop returns CANCELLED status.
 
         Returns:
             RunResult with status, answer, steps, and usage.

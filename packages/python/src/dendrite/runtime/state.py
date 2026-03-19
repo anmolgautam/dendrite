@@ -46,6 +46,7 @@ class RunRecord:
     total_output_tokens: int = 0
     total_cost_usd: float | None = None
     meta: dict[str, Any] | None = None
+    retry_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -220,11 +221,17 @@ class StateStore(Protocol):
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
         lease_nonce: str | None = None,
-    ) -> None: ...
+    ) -> bool:
+        """Persist pause state. Returns True if applied, False if nonce stale."""
+        ...
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None: ...
 
-    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool: ...
+    async def claim_paused_run(
+        self, run_id: str, *, expected_status: str, executor_id: str = ""
+    ) -> str | None:
+        """Atomically claim a paused run. Returns lease nonce on success, None on failure."""
+        ...
 
     async def save_run_event(
         self,
@@ -358,7 +365,7 @@ class SQLAlchemyStateStore:
             run = AgentRun(
                 id=run_id,
                 agent_name=agent_name,
-                status=AgentRunStatus.RUNNING,
+                status=AgentRunStatus.PENDING,
                 input_data=input_data,
                 model=model,
                 strategy=strategy,
@@ -615,10 +622,11 @@ class SQLAlchemyStateStore:
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
         lease_nonce: str | None = None,
-    ) -> None:
-        """Persist pause state and set WAITING status.
+    ) -> bool:
+        """Persist pause state and set WAITING status. Returns True if applied.
 
         Clears lease state (invariant 8: lease cleared on exit from running).
+        Returns False if nonce didn't match (stale executor).
         """
         from sqlalchemy import func, update
 
@@ -640,8 +648,9 @@ class SQLAlchemyStateStore:
             if lease_nonce is not None:
                 conditions.append(AgentRun.lease_nonce == lease_nonce)
             stmt = update(AgentRun).where(*conditions).values(**values)
-            await session.execute(stmt)
+            result = await session.execute(stmt)
             await session.commit()
+            return bool(result.rowcount and result.rowcount > 0) if lease_nonce else True
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         """Retrieve pause_data for a run. Returns None if no run or no pause data."""
@@ -658,26 +667,36 @@ class SQLAlchemyStateStore:
                 return None
             return dict(row)  # type narrowing for mypy
 
-    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
-        """Atomically transition a paused run to RUNNING.
+    async def claim_paused_run(
+        self, run_id: str, *, expected_status: str, executor_id: str = ""
+    ) -> str | None:
+        """Atomically transition a paused run to RUNNING with a lease.
 
-        Returns True if the claim succeeded (run was in expected_status).
-        Returns False if someone else already claimed it or status didn't match.
-        Uses UPDATE ... WHERE status=? for atomicity — no race window.
+        Returns the lease nonce on success, None if claim failed.
+        Sets executor_id, lease_nonce, and heartbeat_at atomically.
         """
         from sqlalchemy import func, update
 
         from dendrite.db.models import AgentRun
 
+        nonce = generate_ulid()
         async with self._session_factory() as session:
             stmt = (
                 update(AgentRun)
                 .where(AgentRun.id == run_id, AgentRun.status == expected_status)
-                .values(status="running", updated_at=func.now())
+                .values(
+                    status="running",
+                    executor_id=executor_id or None,
+                    lease_nonce=nonce,
+                    heartbeat_at=func.now(),
+                    updated_at=func.now(),
+                )
             )
             result = await session.execute(stmt)
             await session.commit()
-            return bool(result.rowcount and result.rowcount > 0)
+            if result.rowcount and result.rowcount > 0:
+                return nonce
+            return None
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
@@ -1012,6 +1031,7 @@ def _run_to_record(row: AgentRun) -> RunRecord:
         total_output_tokens=row.total_output_tokens,
         total_cost_usd=float(row.total_cost_usd) if row.total_cost_usd is not None else None,
         meta=row.meta,
+        retry_count=row.retry_count,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
