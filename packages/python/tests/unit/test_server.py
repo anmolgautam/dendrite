@@ -179,6 +179,7 @@ class MockServerStore:
             answer=run.get("answer"),
             error=run.get("error"),
             iteration_count=run.get("iteration_count", 0),
+            input_data=run.get("input_data"),
         )
 
     async def get_traces(self, run_id: str) -> list[Any]:
@@ -230,6 +231,7 @@ async def _make_client(
     *,
     hmac_secret: str | None = None,
     allow_insecure_dev_mode: bool = True,
+    with_worker: bool = False,
 ) -> AsyncClient:
     """Create an httpx AsyncClient for the Dendrite app."""
     app = create_app(
@@ -237,6 +239,7 @@ async def _make_client(
         registry=registry,
         hmac_secret=hmac_secret,
         allow_insecure_dev_mode=allow_insecure_dev_mode,
+        with_worker=with_worker,
     )
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
@@ -266,6 +269,44 @@ class TestCreateRun:
 
             # Wait for background task to complete
             await asyncio.sleep(0.2)
+
+    async def test_create_run_with_worker_returns_pending(self) -> None:
+        """with_worker=True: creates run as pending, returns immediately."""
+        store = MockServerStore()
+        registry = _make_registry([LLMResponse(text="Hello!")])
+        async with await _make_client(store, registry, with_worker=True) as client:
+            resp = await client.post(
+                "/runs",
+                json={
+                    "agent_name": "TestAgent",
+                    "input": "Say hello",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "run_id" in data
+            assert data["status"] == "pending"
+
+            # Run should be in DB as pending (not executed)
+            run_id = data["run_id"]
+            run = store._runs.get(run_id)
+            assert run is not None
+            assert run["status"] == "pending"
+
+    async def test_create_run_with_worker_sse_returns_501(self) -> None:
+        """with_worker=True: SSE endpoint returns 501 (not supported)."""
+        store = MockServerStore()
+        registry = _make_registry([LLMResponse(text="Hello!")])
+        async with await _make_client(store, registry, with_worker=True) as client:
+            resp = await client.post(
+                "/runs",
+                json={"agent_name": "TestAgent", "input": "hello"},
+            )
+            run_id = resp.json()["run_id"]
+
+            sse_resp = await client.get(f"/runs/{run_id}/events")
+            assert sse_resp.status_code == 501
+            assert "worker mode" in sse_resp.json()["detail"].lower()
 
     async def test_create_run_unknown_agent_returns_404(self) -> None:
         store = MockServerStore()

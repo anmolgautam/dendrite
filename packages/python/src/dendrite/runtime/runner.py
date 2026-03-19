@@ -163,11 +163,13 @@ async def run(
 
     if state_store is not None:
         # Create the run record as PENDING (Sprint 4: lease model)
-        redacted_input = redact(user_input) if redact else user_input
+        # input_data stores unredacted executable input — it is private
+        # execution state, not display data. Dashboard reads from redacted
+        # traces instead. See Option C in USAGE.md / Learning #18.
         await state_store.create_run(
             run_id,
             agent.name,
-            input_data={"input": redacted_input},
+            input_data={"input": user_input},
             model=agent.model,
             strategy=type(resolved_strategy).__name__,
             tenant_id=tenant_id,
@@ -307,6 +309,201 @@ async def run(
         # Stop heartbeat — lease state is already cleared by finalize/pause above
         if lease is not None:
             await lease.stop_heartbeat()
+
+
+async def execute_pending_run(
+    run_id: str,
+    *,
+    state_store: StateStore,
+    agent: Agent,
+    provider: LLMProvider,
+    strategy: Strategy | None = None,
+    loop: Loop | None = None,
+    redact: Callable[[str], str] | None = None,
+    extra_observer: Any | None = None,
+) -> RunResult:
+    """Execute an already-created pending run from its persisted state.
+
+    Unlike run(), this does NOT create the run record — it expects
+    the run to already exist with status=pending and input_data populated.
+
+    This is the public execution seam. Used by:
+    - WorkerLoop (DB polling)
+    - Server (POST /runs → create pending → execute via this function)
+    - Future Celery tasks (broker message → call this)
+    - Future Redis workers (BRPOP → call this)
+
+    Args:
+        run_id: The pending run's ID.
+        state_store: Persistence backend (required).
+        agent: Agent definition (must match the run's agent_name).
+        provider: LLM provider for execution.
+        strategy: Strategy override. Defaults to NativeToolCalling.
+        loop: Loop override. Defaults to ReActLoop.
+        redact: Redaction policy for persistence.
+        extra_observer: Optional additional LoopObserver (e.g. TransportObserver)
+            to compose with the PersistenceObserver for SSE streaming.
+
+    Raises:
+        ValueError: If the run doesn't exist, isn't pending, or has no input.
+    """
+    from dendrite.runtime.lease import ExecutionLease
+    from dendrite.runtime.observer import PersistenceObserver
+    from dendrite.tool import get_tool_def
+
+    resolved_strategy = strategy or NativeToolCalling()
+    resolved_loop = loop or ReActLoop()
+
+    # 1. Validate the run exists and is pending
+    run_record = await state_store.get_run(run_id)
+    if run_record is None:
+        raise ValueError(f"Run '{run_id}' not found.")
+    if run_record.status != "pending":
+        raise ValueError(
+            f"Run '{run_id}' has status '{run_record.status}' — only pending runs can be executed."
+        )
+    if not run_record.input_data or "input" not in run_record.input_data:
+        raise ValueError(
+            f"Run '{run_id}' has no input_data — cannot execute. "
+            f"Runs must be created via run() or the server."
+        )
+    user_input = run_record.input_data["input"]
+
+    # 2. Claim lease (PENDING → RUNNING)
+    lease = await ExecutionLease.acquire(state_store, run_id, _executor_id())
+    if lease is None:
+        raise ValueError(
+            f"Failed to claim run '{run_id}' — it may have been claimed by another executor."
+        )
+    lease_nonce = lease.nonce
+    lease.start_heartbeat()
+
+    # 3. Initialize sequencer from DB max
+    existing_events = await state_store.get_run_events(run_id)
+    max_seq = max((e.sequence_index for e in existing_events), default=-1)
+    sequencer = EventSequencer(initial=max_seq + 1)
+
+    # 4. Create observer
+    target_lookup = {}
+    for fn in agent.tools:
+        td = get_tool_def(fn)
+        target_lookup[td.name] = td.target
+    persistence_obs = PersistenceObserver(
+        state_store,
+        run_id,
+        model=agent.model,
+        provider_name=type(provider).__name__,
+        target_lookup=target_lookup,
+        redact=redact,
+        event_sequencer=sequencer,
+        lease_nonce=lease_nonce,
+    )
+
+    # Compose with extra observer (e.g. TransportObserver for SSE)
+    observer: Any
+    if extra_observer is not None:
+        from dendrite.server.observer import CompositeObserver
+
+        observer = CompositeObserver([persistence_obs, extra_observer])
+    else:
+        observer = persistence_obs
+
+    await _emit_event(
+        state_store,
+        run_id,
+        "run.started",
+        sequencer,
+        {"agent_name": agent.name, "system_prompt": agent.prompt},
+        lease_nonce=lease_nonce,
+    )
+
+    # 5. Execute the loop
+    try:
+        result = await resolved_loop.run(
+            agent=agent,
+            provider=provider,
+            strategy=resolved_strategy,
+            user_input=user_input,
+            run_id=run_id,
+            observer=observer,
+            abort_check=lambda: not lease.is_valid,
+        )
+
+        if not lease.is_valid:
+            logger.warning("Lease superseded for run %s — skipping finalize", run_id)
+            return result
+
+        if result.status in (RunStatus.WAITING_CLIENT_TOOL, RunStatus.WAITING_HUMAN_INPUT):
+            pause_state: PauseState = result.meta["pause_state"]
+            pause_won = await state_store.pause_run(
+                run_id,
+                status=result.status.value,
+                pause_data=pause_state.to_dict(),
+                iteration_count=result.iteration_count,
+                lease_nonce=lease_nonce,
+            )
+            if pause_won:
+                await _emit_event(
+                    state_store,
+                    run_id,
+                    "run.paused",
+                    sequencer,
+                    {
+                        "status": result.status.value,
+                        "pending_tool_calls": [
+                            {
+                                "id": tc.id,
+                                "name": tc.name,
+                                "target": pause_state.pending_targets.get(tc.id),
+                            }
+                            for tc in pause_state.pending_tool_calls
+                        ],
+                    },
+                )
+        else:
+            redacted_answer = redact(result.answer) if redact and result.answer else result.answer
+            finalize_won = await state_store.finalize_run(
+                run_id,
+                status=result.status.value,
+                answer=redacted_answer,
+                iteration_count=result.iteration_count,
+                total_usage=result.usage,
+                expected_current_status="running",
+                lease_nonce=lease_nonce,
+            )
+            if finalize_won:
+                await _emit_event(
+                    state_store,
+                    run_id,
+                    "run.completed",
+                    sequencer,
+                    {"status": result.status.value},
+                )
+
+        return result
+
+    except Exception as exc:
+        error_won = False
+        try:
+            redacted_err = redact(str(exc)) if redact else str(exc)
+            error_won = await state_store.finalize_run(
+                run_id,
+                status=RunStatus.ERROR.value,
+                error=redacted_err,
+                total_usage=None,
+                expected_current_status="running",
+                lease_nonce=lease_nonce,
+            )
+        except Exception:
+            logger.warning("Failed to persist ERROR for run %s", run_id, exc_info=True)
+        if error_won:
+            await _emit_event(
+                state_store, run_id, "run.error", sequencer, {"error": str(exc)[:500]}
+            )
+        raise
+
+    finally:
+        await lease.stop_heartbeat()
 
 
 async def resume(
@@ -623,6 +820,67 @@ async def recover_run(
 
     finally:
         await lease.stop_heartbeat()
+
+
+async def recover_stale_runs(
+    state_store: StateStore,
+    *,
+    agent: Agent,
+    provider: LLMProvider,
+    strategy: Strategy | None = None,
+    loop: Loop | None = None,
+    redact: Callable[[str], str] | None = None,
+    threshold_seconds: int = 60,
+) -> list[RunResult]:
+    """Convenience helper: find and recover all stale runs.
+
+    For Mode 1 (scripts) and Mode 2 (backend apps) — call on startup
+    to recover any runs that crashed during the previous process lifetime.
+
+    Single-agent only: passes the same agent/provider to all recoveries.
+    If your deployment runs multiple agents, use WorkerLoop instead —
+    it resolves agent/provider per run via the AgentRegistry.
+
+    Steps for each stale run:
+    1. find_stale_runs() — identify runs with expired heartbeats
+    2. reclaim_stale_run() — re-queue as pending (increments retry_count)
+    3. recover_run() — reconstruct from persisted state and re-enter loop
+
+    Args:
+        state_store: Persistence backend.
+        agent: Agent definition for all recovered runs.
+        provider: LLM provider for recovery execution.
+        threshold_seconds: Heartbeat staleness threshold (default 60s).
+
+    Returns:
+        List of RunResults for successfully recovered runs.
+        Runs that fail recovery are logged but not re-raised.
+    """
+    stale_ids = await state_store.find_stale_runs(threshold_seconds)
+    results: list[RunResult] = []
+
+    for run_id in stale_ids:
+        reclaimed = await state_store.reclaim_stale_run(run_id)
+        if not reclaimed:
+            logger.info("Stale run %s not reclaimed (retry limit or status changed)", run_id)
+            continue
+
+        try:
+            result = await recover_run(
+                run_id,
+                state_store=state_store,
+                agent=agent,
+                provider=provider,
+                strategy=strategy,
+                loop=loop,
+                redact=redact,
+            )
+            results.append(result)
+            logger.info("Recovered stale run %s → %s", run_id, result.status.value)
+        except Exception:
+            logger.warning("Failed to recover stale run %s", run_id, exc_info=True)
+
+    return results
 
 
 async def _resume_core(

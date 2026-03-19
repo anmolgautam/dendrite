@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from dendrite.server.auth import extract_bearer_token, generate_run_token, verify_run_token
-from dendrite.server.observer import CompositeObserver, ServerEvent, TransportObserver
+from dendrite.server.observer import ServerEvent, TransportObserver
 from dendrite.server.schemas import (
     CreateRunRequest,
     CreateRunResponse,
@@ -93,6 +93,7 @@ def create_app(
     *,
     hmac_secret: str | None = None,
     allow_insecure_dev_mode: bool = False,
+    with_worker: bool = False,
 ) -> FastAPI:
     """Create a mountable Dendrite FastAPI application.
 
@@ -104,6 +105,26 @@ def create_app(
         allow_insecure_dev_mode: When True and hmac_secret is None, auth is
             disabled with a warning. When False (default) and hmac_secret is
             None, startup fails.
+        with_worker: When True, POST /runs only creates the run record as
+            pending and returns immediately — a WorkerLoop picks it up.
+            When False (default), the server spawns a background task that
+            calls execute_pending_run() inline (backward compatible).
+
+    Execution modes and SSE:
+
+        inline (with_worker=False):
+            POST /runs → creates + executes in background task
+            GET /runs/{id}/events → SSE streaming (live)
+            GET /runs/{id} → polling
+
+        worker (with_worker=True):
+            POST /runs → creates as pending, returns immediately
+            GET /runs/{id}/events → 501 (not supported)
+            GET /runs/{id} → polling
+
+        Worker-mode SSE requires a cross-process event transport
+        (Redis pub/sub, DB event tailing, etc.) — planned for a
+        future sprint. Polling and dashboard work in both modes.
     """
     if hmac_secret is None and not allow_insecure_dev_mode:
         raise ValueError(
@@ -161,7 +182,13 @@ def create_app(
 
     @app.post("/runs", response_model=CreateRunResponse)
     async def create_run(req: CreateRunRequest) -> CreateRunResponse:
-        """Start a new agent run in a background task.
+        """Create a new agent run.
+
+        When with_worker=False (default): creates the run as pending, then
+        spawns a background task that calls execute_pending_run() inline.
+
+        When with_worker=True: creates the run as pending and returns
+        immediately. A WorkerLoop picks it up via DB polling.
 
         Intentionally unauthenticated — the token doesn't exist until
         the run is created. Access control for run creation is the
@@ -176,124 +203,79 @@ def create_app(
 
         run_id = generate_ulid()
 
-        # Create SSE queue for this run
+        agent = config.agent
+        strategy = config.strategy_factory() if config.strategy_factory else None
+
+        # Create run record as PENDING — input_data stores unredacted
+        # executable input (private execution state, not display data).
+        await state_store.create_run(
+            run_id,
+            agent.name,
+            input_data={"input": req.input},
+            model=agent.model,
+            strategy=type(strategy).__name__ if strategy else "NativeToolCalling",
+            tenant_id=req.tenant_id,
+        )
+
+        # Generate run-scoped token (None when auth is disabled)
+        token = generate_run_token(run_id, hmac_secret) if auth_enabled and hmac_secret else None
+
+        if with_worker:
+            # Worker mode: return immediately, WorkerLoop claims and executes.
+            return CreateRunResponse(run_id=run_id, status="pending", token=token)
+
+        # Inline mode: server executes via background task.
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
         sse_queues[run_id] = queue
 
         async def _run_agent() -> Any:
-            """Background task — runs the agent with persistence + transport."""
-            from dendrite.runtime.observer import PersistenceObserver
-            from dendrite.runtime.runner import EventSequencer, _emit_event
-            from dendrite.tool import get_tool_def
+            """Background task — executes via the shared execution seam.
+
+            Uses execute_pending_run() so the server follows the same
+            lease-aware path as the WorkerLoop. The atomic claim in
+            execute_pending_run prevents double-execution if a WorkerLoop
+            is also running (misconfiguration guard).
+            """
+            from dendrite.runtime.runner import execute_pending_run
             from dendrite.types import PauseState, RunStatus
 
-            agent = config.agent
             provider = config.provider_factory()
-            strategy = config.strategy_factory() if config.strategy_factory else None
             loop = config.loop_factory() if config.loop_factory else None
             redact = config.redact
 
-            # Shared sequence counter — monotonic across runner + observer
-            sequencer = EventSequencer()
+            # SSE: notify client that the run is enqueued.
+            # run.started is emitted by execute_pending_run when the lease is claimed.
+            await queue.put(ServerEvent(event="run.queued", data={"run_id": run_id}))
 
-            # Create persistence observer with shared sequencer
-            target_lookup = {}
-            for fn in agent.tools:
-                td = get_tool_def(fn)
-                target_lookup[td.name] = td.target
-
-            persistence_obs = PersistenceObserver(
-                state_store,
-                run_id,
-                model=agent.model,
-                provider_name=type(provider).__name__,
-                target_lookup=target_lookup,
-                redact=redact,
-                event_sequencer=sequencer,
-            )
             transport_obs = TransportObserver(queue)
-            composite = CompositeObserver([persistence_obs, transport_obs])
 
-            # Create run record
-            redacted_input = redact(req.input) if redact else req.input
-            await state_store.create_run(
-                run_id,
-                agent.name,
-                input_data={"input": redacted_input},
-                model=agent.model,
-                strategy=type(strategy).__name__ if strategy else "NativeToolCalling",
-                tenant_id=req.tenant_id,
-            )
-
-            # Durable run.started event + SSE
-            await _emit_event(
-                state_store,
-                run_id,
-                "run.started",
-                sequencer,
-                {"agent_name": agent.name, "system_prompt": agent.prompt},
-            )
-            await queue.put(ServerEvent(event="run.started", data={"run_id": run_id}))
-
-            is_paused = False
-            is_cancelled = False
             try:
-                from dendrite.loops.react import ReActLoop
-                from dendrite.strategies.native import NativeToolCalling
-
-                resolved_strategy = strategy or NativeToolCalling()
-                resolved_loop = loop or ReActLoop()
-
-                result = await resolved_loop.run(
+                result = await execute_pending_run(
+                    run_id,
+                    state_store=state_store,
                     agent=agent,
                     provider=provider,
-                    strategy=resolved_strategy,
-                    user_input=req.input,
-                    run_id=run_id,
-                    observer=composite,
+                    strategy=strategy,
+                    loop=loop,
+                    redact=redact,
+                    extra_observer=transport_obs,
                 )
 
-                # Handle result
+                # Emit SSE events based on result status
                 if result.status in (
                     RunStatus.WAITING_CLIENT_TOOL,
                     RunStatus.WAITING_HUMAN_INPUT,
                 ):
-                    is_paused = True
-                    pause_state: PauseState = result.meta["pause_state"]
-                    await state_store.pause_run(
-                        run_id,
-                        status=result.status.value,
-                        pause_data=pause_state.to_dict(),
-                        iteration_count=result.iteration_count,
-                    )
-                    # Durable run.paused event
-                    await _emit_event(
-                        state_store,
-                        run_id,
-                        "run.paused",
-                        sequencer,
-                        {
-                            "status": result.status.value,
-                            "pending_tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "name": tc.name,
-                                    "target": pause_state.pending_targets.get(tc.id),
-                                }
-                                for tc in pause_state.pending_tool_calls
-                            ],
-                        },
-                    )
-                    # Emit distinct SSE pause events (D3)
                     if result.status == RunStatus.WAITING_CLIENT_TOOL:
+                        ps: PauseState = result.meta["pause_state"]
                         pending = [
                             {
                                 "tool_call_id": tc.id,
                                 "tool_name": tc.name,
                                 "params": tc.params,
-                                "target": pause_state.pending_targets.get(tc.id, "client"),
+                                "target": ps.pending_targets.get(tc.id, "client"),
                             }
-                            for tc in pause_state.pending_tool_calls
+                            for tc in ps.pending_tool_calls
                         ]
                         await queue.put(
                             ServerEvent(
@@ -309,104 +291,38 @@ def create_app(
                             )
                         )
                 else:
-                    redacted_answer = (
-                        redact(result.answer) if redact and result.answer else result.answer
-                    )
-                    # Atomic conditional finalize: only if still RUNNING
-                    # (prevents overwriting CANCELLED set by DELETE)
-                    finalized = await state_store.finalize_run(
+                    # Terminal — buffer for late SSE subscribers
+                    terminal_data = {"run_id": run_id, "status": result.status.value}
+                    task_manager.buffer_terminal_event(
                         run_id,
-                        status=result.status.value,
-                        answer=redacted_answer,
-                        iteration_count=result.iteration_count,
-                        total_usage=result.usage,
-                        expected_current_status="running",
+                        {"event": "run.completed", "data": terminal_data},
                     )
-                    if finalized:
-                        # Durable run.completed event
-                        await _emit_event(
-                            state_store,
-                            run_id,
-                            "run.completed",
-                            sequencer,
-                            {"status": result.status.value},
-                        )
-                        # CAS winner — buffer + emit terminal SSE event
-                        task_manager.buffer_terminal_event(
-                            run_id,
-                            {
-                                "event": "run.completed",
-                                "data": {"run_id": run_id, "status": result.status.value},
-                            },
-                        )
-                        await queue.put(
-                            ServerEvent(
-                                event="run.completed",
-                                data={"run_id": run_id, "status": result.status.value},
-                            )
-                        )
-                    else:
-                        logger.info("Run %s already finalized (likely cancelled), skipping", run_id)
+                    await queue.put(ServerEvent(event="run.completed", data=terminal_data))
+                    sse_queues.pop(run_id, None)
 
                 return result
 
             except asyncio.CancelledError:
-                # DELETE /runs already won the CAS to CANCELLED and is
-                # responsible for emitting the terminal event + buffering.
-                # We do nothing here — only the CAS winner emits.
-                is_cancelled = True
+                # DELETE /runs already won the CAS to CANCELLED.
+                # execute_pending_run handles finalize internally.
                 raise
 
             except Exception as exc:
-                # Only the CAS winner emits the terminal event.
-                error_won = False
-                try:
-                    redacted_err = redact(str(exc)) if redact else str(exc)
-                    error_won = await state_store.finalize_run(
-                        run_id,
-                        status="error",
-                        error=redacted_err,
-                        total_usage=None,
-                        expected_current_status="running",
-                    )
-                except Exception:
-                    logger.warning("Failed to persist ERROR for run %s", run_id, exc_info=True)
-                if error_won:
-                    # Durable run.error event
-                    await _emit_event(
-                        state_store,
-                        run_id,
-                        "run.error",
-                        sequencer,
-                        {"error": str(exc)[:500]},
-                    )
-                    # CAS winner — buffer + emit terminal SSE event
-                    task_manager.buffer_terminal_event(
-                        run_id,
-                        {
-                            "event": "run.error",
-                            "data": {"run_id": run_id, "error": str(exc)[:200]},
-                        },
-                    )
-                    await queue.put(
-                        ServerEvent(
-                            event="run.error",
-                            data={"run_id": run_id, "error": str(exc)[:200]},
-                        )
-                    )
+                # execute_pending_run already finalized as error internally.
+                # This handler emits SSE and buffers for late subscribers.
+                # Note: if execute_pending_run failed before claiming a lease
+                # (e.g. validation error), the run may still be pending in DB.
+                # The SSE error is informational for the connected client.
+                error_data = {"run_id": run_id, "error": str(exc)[:200]}
+                task_manager.buffer_terminal_event(
+                    run_id,
+                    {"event": "run.error", "data": error_data},
+                )
+                await queue.put(ServerEvent(event="run.error", data=error_data))
+                sse_queues.pop(run_id, None)
                 raise
 
-            finally:
-                # Clean up SSE queue for terminal runs (not paused).
-                # Paused runs keep the queue for resume SSE.
-                # On cancellation, DELETE owns cleanup — don't touch the queue.
-                if not is_paused and not is_cancelled:
-                    sse_queues.pop(run_id, None)
-
         task_manager.spawn(run_id, _run_agent())
-
-        # Generate run-scoped token (None when auth is disabled)
-        token = generate_run_token(run_id, hmac_secret) if auth_enabled and hmac_secret else None
 
         return CreateRunResponse(run_id=run_id, status="running", token=token)
 
@@ -446,7 +362,22 @@ def create_app(
 
     @app.get("/runs/{run_id}/events")
     async def stream_events(run_id: str, request: Request) -> StreamingResponse:
-        """SSE event stream for a run."""
+        """SSE event stream for a run.
+
+        Only available in inline mode (with_worker=False). In worker mode,
+        execution happens in a separate process with no shared memory for
+        SSE queues. Use GET /runs/{id} for polling instead.
+
+        Worker-mode SSE requires a pub/sub transport (Redis, DB polling)
+        which is planned for a future sprint.
+        """
+        if with_worker:
+            raise HTTPException(
+                status_code=501,
+                detail="SSE streaming is not available in worker mode. "
+                "Use GET /runs/{run_id} for polling. "
+                "Worker-mode SSE requires pub/sub transport (planned).",
+            )
         _require_run_token(request, run_id)
         queue = sse_queues.get(run_id)
 

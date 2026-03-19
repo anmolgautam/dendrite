@@ -124,7 +124,6 @@ class TestNormalizeTimeline:
                 id="r1",
                 agent_name="TestAgent",
                 status="success",
-                input_data={"input": "hello"},
                 answer="world",
                 iteration_count=1,
                 total_input_tokens=100,
@@ -166,6 +165,7 @@ class TestNormalizeTimeline:
         assert result is not None
         assert result.summary.run_id == "r1"
         assert result.summary.agent_name == "TestAgent"
+        assert result.summary.input_text == "hello"  # derived from first USER trace, not input_data
         assert result.summary.answer == "world"
         assert len(result.nodes) == 3
 
@@ -352,7 +352,6 @@ class TestNormalizeTimeline:
                 id="r6",
                 agent_name="SpreadsheetAnalyst",
                 status="success",
-                input_data={"input": "analyze"},
                 answer="Done",
                 iteration_count=2,
                 model="claude-sonnet",
@@ -428,6 +427,7 @@ class TestNormalizeTimeline:
                 ),
             ],
             _traces=[
+                _Trace(role="user", content="analyze", order_index=0, meta={"iteration": 0}),
                 _Trace(
                     role="assistant",
                     content="Let me look up...",
@@ -478,6 +478,55 @@ class TestNormalizeTimeline:
         llm1 = result.nodes[1]
         assert isinstance(llm1, LLMCallNode)
         assert llm1.assistant_text == "Let me look up..."
+
+    async def test_input_text_derived_from_trace_not_input_data(self) -> None:
+        """input_text comes from the first USER trace, not run_record.input_data.
+
+        input_data is private execution state (like pause_data) and must
+        not be surfaced. The USER trace is already redacted by the observer.
+        """
+        store = NormalizerMockStore(
+            _run=_Run(
+                id="r_priv",
+                agent_name="A",
+                status="success",
+                # input_data has the UNREDACTED value — should NOT appear in summary
+                input_data={"input": "Process card 4111-1111-1111-1111"},
+            ),
+            _events=[],
+            _traces=[
+                # The trace has the REDACTED value — this is what the dashboard shows
+                _Trace(
+                    role="user",
+                    content="Process card [REDACTED]",
+                    order_index=0,
+                    meta={"iteration": 0},
+                ),
+            ],
+        )
+
+        result = await normalize_timeline("r_priv", store)
+        assert result is not None
+        # Must show redacted trace content, not raw input_data
+        assert result.summary.input_text == "Process card [REDACTED]"
+        assert "4111" not in (result.summary.input_text or "")
+
+    async def test_input_text_none_when_no_user_trace(self) -> None:
+        """input_text is None when there are no USER traces (edge case)."""
+        store = NormalizerMockStore(
+            _run=_Run(
+                id="r_no_trace",
+                agent_name="A",
+                status="error",
+                input_data={"input": "some input"},
+            ),
+            _events=[],
+            _traces=[],  # no traces (run errored before first trace)
+        )
+
+        result = await normalize_timeline("r_no_trace", store)
+        assert result is not None
+        assert result.summary.input_text is None
 
     async def test_system_prompt_from_run_started_event(self) -> None:
         """System prompt is extracted from run.started event data, not traces."""
