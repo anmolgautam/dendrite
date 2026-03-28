@@ -46,7 +46,6 @@ class RunRecord:
     total_output_tokens: int = 0
     total_cost_usd: float | None = None
     meta: dict[str, Any] | None = None
-    retry_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -118,12 +117,6 @@ class StateStore(Protocol):
 
     Implement this protocol to use a custom storage backend.
     The SQLAlchemy implementation is the default.
-
-    Lease-aware writes: methods that mutate run data accept an optional
-    ``lease_nonce``. When provided, the write is rejected (returns False
-    or silently skips) if the nonce does not match the current DB value.
-    This prevents stale/zombie executors from corrupting state after
-    their lease has been superseded.
     """
 
     async def create_run(
@@ -148,7 +141,6 @@ class StateStore(Protocol):
         *,
         order_index: int,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None: ...
 
     async def save_tool_call(
@@ -166,7 +158,6 @@ class StateStore(Protocol):
         iteration_index: int,
         error_message: str | None = None,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None: ...
 
     async def save_usage(
@@ -179,7 +170,6 @@ class StateStore(Protocol):
         provider: str | None = None,
         duration_ms: int | None = None,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None: ...
 
     async def save_llm_interaction(
@@ -195,7 +185,6 @@ class StateStore(Protocol):
         semantic_response: dict[str, Any] | None = None,
         provider_request: dict[str, Any] | None = None,
         provider_response: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None: ...
 
     async def get_llm_interactions(self, run_id: str) -> list[LLMInteractionRecord]: ...
@@ -210,7 +199,6 @@ class StateStore(Protocol):
         iteration_count: int = 0,
         total_usage: UsageStats | None = None,
         expected_current_status: str | None = None,
-        lease_nonce: str | None = None,
     ) -> bool: ...
 
     async def pause_run(
@@ -220,18 +208,17 @@ class StateStore(Protocol):
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
-        lease_nonce: str | None = None,
-    ) -> bool:
-        """Persist pause state. Returns True if applied, False if nonce stale."""
-        ...
+    ) -> None: ...
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None: ...
 
-    async def claim_paused_run(
-        self, run_id: str, *, expected_status: str, executor_id: str = ""
-    ) -> str | None:
-        """Atomically claim a paused run. Returns lease nonce on success, None on failure."""
-        ...
+    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool: ...
+
+    async def get_run(self, run_id: str) -> RunRecord | None: ...
+
+    async def get_traces(self, run_id: str) -> list[TraceRecord]: ...
+
+    async def get_tool_calls(self, run_id: str) -> list[ToolCallReadRecord]: ...
 
     async def save_run_event(
         self,
@@ -242,60 +229,7 @@ class StateStore(Protocol):
         iteration_index: int = 0,
         correlation_id: str | None = None,
         data: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None: ...
-
-    # -- Lease operations (Sprint 4) --
-
-    async def claim_run(self, run_id: str, executor_id: str) -> str | None:
-        """Atomically claim a pending run for execution.
-
-        Sets executor_id, generates a fresh lease_nonce (ULID), sets
-        heartbeat_at, transitions status to 'running'.
-
-        Returns the nonce on success, None if already claimed or not pending.
-        """
-        ...
-
-    async def renew_heartbeat(self, run_id: str, lease_nonce: str) -> bool:
-        """Update heartbeat_at for an active lease. Nonce-guarded.
-
-        Returns True if updated, False if nonce doesn't match (lease superseded).
-        """
-        ...
-
-    async def find_stale_runs(self, threshold_seconds: int) -> list[str]:
-        """Find running runs with stale heartbeats.
-
-        Returns run IDs where status='running' AND heartbeat_at is older
-        than threshold_seconds. Does NOT return waiting/terminal runs.
-        """
-        ...
-
-    async def reclaim_stale_run(self, run_id: str) -> bool:
-        """Re-queue a stale run for recovery.
-
-        If retry_count < max_retries: set status='pending', clear lease state,
-        increment retry_count. Returns True.
-        If retry_count >= max_retries: set status='error'. Returns False.
-        """
-        ...
-
-    async def release_lease(self, run_id: str, lease_nonce: str) -> None:
-        """Clear lease state (executor_id, lease_nonce, heartbeat_at).
-
-        Called when execution leaves running (pause, success, error, cancel).
-        Nonce-guarded — only the current lease holder can release.
-        """
-        ...
-
-    # -- Read operations --
-
-    async def get_run(self, run_id: str) -> RunRecord | None: ...
-
-    async def get_traces(self, run_id: str) -> list[TraceRecord]: ...
-
-    async def get_tool_calls(self, run_id: str) -> list[ToolCallReadRecord]: ...
 
     async def get_run_events(self, run_id: str) -> list[RunEventRecord]: ...
 
@@ -313,10 +247,6 @@ class SQLAlchemyStateStore:
     """Default StateStore implementation using SQLAlchemy async.
 
     Works with SQLite (zero-config) and Postgres (via DENDRITE_DATABASE_URL).
-
-    Lease-aware writes: when ``lease_nonce`` is passed to a mutating method,
-    the write first validates that the nonce matches the current DB value.
-    If not, the write is silently skipped (stale executor protection).
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
@@ -327,23 +257,6 @@ class SQLAlchemyStateStore:
         self._session_factory = sessionmaker(  # type: ignore[call-overload]
             engine, class_=AsyncSession, expire_on_commit=False
         )
-
-    async def _verify_nonce(self, session: Any, run_id: str, lease_nonce: str) -> bool:
-        """Check if a lease nonce is still valid, locking the row until commit.
-
-        Uses SELECT ... FOR UPDATE on Postgres to prevent TOCTOU races.
-        SQLite ignores FOR UPDATE (single-writer model makes it unnecessary).
-        The lock is held until the session commits, so the subsequent INSERT
-        in the same session is atomic with the nonce check.
-        """
-        from sqlalchemy import select
-
-        from dendrite.db.models import AgentRun
-
-        stmt = select(AgentRun.lease_nonce).where(AgentRun.id == run_id).with_for_update()
-        result = await session.execute(stmt)
-        current_nonce = result.scalar_one_or_none()
-        return bool(current_nonce == lease_nonce)
 
     async def create_run(
         self,
@@ -365,7 +278,7 @@ class SQLAlchemyStateStore:
             run = AgentRun(
                 id=run_id,
                 agent_name=agent_name,
-                status=AgentRunStatus.PENDING,
+                status=AgentRunStatus.RUNNING,
                 input_data=input_data,
                 model=model,
                 strategy=strategy,
@@ -385,13 +298,10 @@ class SQLAlchemyStateStore:
         *,
         order_index: int,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None:
         from dendrite.db.models import ReactTrace
 
         async with self._session_factory() as session:
-            if lease_nonce and not await self._verify_nonce(session, run_id, lease_nonce):
-                return  # stale executor — row lock released on session close
             trace = ReactTrace(
                 id=generate_ulid(),
                 agent_run_id=run_id,
@@ -418,7 +328,6 @@ class SQLAlchemyStateStore:
         iteration_index: int,
         error_message: str | None = None,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None:
         from dendrite.db.models import ToolCallRecord
 
@@ -429,8 +338,6 @@ class SQLAlchemyStateStore:
             result_dict = {"raw": result_payload}
 
         async with self._session_factory() as session:
-            if lease_nonce and not await self._verify_nonce(session, run_id, lease_nonce):
-                return
             record = ToolCallRecord(
                 id=generate_ulid(),
                 agent_run_id=run_id,
@@ -459,13 +366,10 @@ class SQLAlchemyStateStore:
         provider: str | None = None,
         duration_ms: int | None = None,
         meta: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None:
         from dendrite.db.models import TokenUsage
 
         async with self._session_factory() as session:
-            if lease_nonce and not await self._verify_nonce(session, run_id, lease_nonce):
-                return
             record = TokenUsage(
                 id=generate_ulid(),
                 agent_run_id=run_id,
@@ -494,13 +398,10 @@ class SQLAlchemyStateStore:
         semantic_response: dict[str, Any] | None = None,
         provider_request: dict[str, Any] | None = None,
         provider_response: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None:
         from dendrite.db.models import LLMInteraction
 
         async with self._session_factory() as session:
-            if lease_nonce and not await self._verify_nonce(session, run_id, lease_nonce):
-                return
             record = LLMInteraction(
                 id=generate_ulid(),
                 agent_run_id=run_id,
@@ -561,7 +462,6 @@ class SQLAlchemyStateStore:
         iteration_count: int | None = None,
         total_usage: UsageStats | None = None,
         expected_current_status: str | None = None,
-        lease_nonce: str | None = None,
     ) -> bool:
         """Finalize a run. Returns True if the update was applied.
 
@@ -569,7 +469,6 @@ class SQLAlchemyStateStore:
             expected_current_status: If provided, only updates the row if the
                 current DB status matches. Returns False if status has changed
                 (e.g. already cancelled). This prevents cancel/finalize races.
-            lease_nonce: If provided, also requires matching nonce (Sprint 4).
         """
         from sqlalchemy import func, update
 
@@ -593,25 +492,21 @@ class SQLAlchemyStateStore:
 
             # Clear pause_data on finalize (D1: execution state cleaned up)
             values["pause_data"] = None
-            # Clear lease state on finalize (invariant 8: lease cleared on exit from running)
-            values["executor_id"] = None
-            values["lease_nonce"] = None
-            values["heartbeat_at"] = None
 
-            # Build WHERE clause
-            conditions = [AgentRun.id == run_id]
+            # Conditional finalize: only update if status is still 'running'
+            # (or expected_status if provided). Prevents cancel/finalize races.
             if expected_current_status is not None:
-                conditions.append(AgentRun.status == expected_current_status)
-            if lease_nonce is not None:
-                conditions.append(AgentRun.lease_nonce == lease_nonce)
-
-            stmt = update(AgentRun).where(*conditions).values(**values)
+                stmt = (
+                    update(AgentRun)
+                    .where(AgentRun.id == run_id, AgentRun.status == expected_current_status)
+                    .values(**values)
+                )
+            else:
+                stmt = update(AgentRun).where(AgentRun.id == run_id).values(**values)
             result = await session.execute(stmt)
             await session.commit()
             return (
-                bool(result.rowcount and result.rowcount > 0)
-                if (expected_current_status or lease_nonce)
-                else True
+                bool(result.rowcount and result.rowcount > 0) if expected_current_status else True
             )
 
     async def pause_run(
@@ -621,13 +516,8 @@ class SQLAlchemyStateStore:
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
-        lease_nonce: str | None = None,
-    ) -> bool:
-        """Persist pause state and set WAITING status. Returns True if applied.
-
-        Clears lease state (invariant 8: lease cleared on exit from running).
-        Returns False if nonce didn't match (stale executor).
-        """
+    ) -> None:
+        """Persist pause state and set WAITING status."""
         from sqlalchemy import func, update
 
         from dendrite.db.models import AgentRun
@@ -637,20 +527,12 @@ class SQLAlchemyStateStore:
                 "status": status,
                 "pause_data": pause_data,
                 "updated_at": func.now(),
-                # Clear lease on pause (invariant 8)
-                "executor_id": None,
-                "lease_nonce": None,
-                "heartbeat_at": None,
             }
             if iteration_count is not None:
                 values["iteration_count"] = iteration_count
-            conditions = [AgentRun.id == run_id]
-            if lease_nonce is not None:
-                conditions.append(AgentRun.lease_nonce == lease_nonce)
-            stmt = update(AgentRun).where(*conditions).values(**values)
-            result = await session.execute(stmt)
+            stmt = update(AgentRun).where(AgentRun.id == run_id).values(**values)
+            await session.execute(stmt)
             await session.commit()
-            return bool(result.rowcount and result.rowcount > 0) if lease_nonce else True
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         """Retrieve pause_data for a run. Returns None if no run or no pause data."""
@@ -667,36 +549,26 @@ class SQLAlchemyStateStore:
                 return None
             return dict(row)  # type narrowing for mypy
 
-    async def claim_paused_run(
-        self, run_id: str, *, expected_status: str, executor_id: str = ""
-    ) -> str | None:
-        """Atomically transition a paused run to RUNNING with a lease.
+    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
+        """Atomically transition a paused run to RUNNING.
 
-        Returns the lease nonce on success, None if claim failed.
-        Sets executor_id, lease_nonce, and heartbeat_at atomically.
+        Returns True if the claim succeeded (run was in expected_status).
+        Returns False if someone else already claimed it or status didn't match.
+        Uses UPDATE ... WHERE status=? for atomicity — no race window.
         """
         from sqlalchemy import func, update
 
         from dendrite.db.models import AgentRun
 
-        nonce = generate_ulid()
         async with self._session_factory() as session:
             stmt = (
                 update(AgentRun)
                 .where(AgentRun.id == run_id, AgentRun.status == expected_status)
-                .values(
-                    status="running",
-                    executor_id=executor_id or None,
-                    lease_nonce=nonce,
-                    heartbeat_at=func.now(),
-                    updated_at=func.now(),
-                )
+                .values(status="running", updated_at=func.now())
             )
             result = await session.execute(stmt)
             await session.commit()
-            if result.rowcount and result.rowcount > 0:
-                return nonce
-            return None
+            return bool(result.rowcount and result.rowcount > 0)
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
@@ -776,13 +648,10 @@ class SQLAlchemyStateStore:
         iteration_index: int = 0,
         correlation_id: str | None = None,
         data: dict[str, Any] | None = None,
-        lease_nonce: str | None = None,
     ) -> None:
         from dendrite.db.models import RunEvent
 
         async with self._session_factory() as session:
-            if lease_nonce and not await self._verify_nonce(session, run_id, lease_nonce):
-                return
             record = RunEvent(
                 id=generate_ulid(),
                 agent_run_id=run_id,
@@ -850,164 +719,6 @@ class SQLAlchemyStateStore:
             rows = result.scalars().all()
             return [_run_to_record(r) for r in rows]
 
-    # ------------------------------------------------------------------
-    # Lease operations (Sprint 4)
-    # ------------------------------------------------------------------
-
-    async def claim_run(self, run_id: str, executor_id: str) -> str | None:
-        """Atomically claim a pending run. Returns nonce on success, None if already claimed."""
-        from sqlalchemy import func, update
-
-        from dendrite.db.models import AgentRun
-
-        nonce = generate_ulid()
-        async with self._session_factory() as session:
-            stmt = (
-                update(AgentRun)
-                .where(
-                    AgentRun.id == run_id,
-                    AgentRun.status == "pending",
-                    AgentRun.executor_id.is_(None),
-                )
-                .values(
-                    executor_id=executor_id,
-                    lease_nonce=nonce,
-                    heartbeat_at=func.now(),
-                    status="running",
-                    updated_at=func.now(),
-                )
-            )
-            result = await session.execute(stmt)
-            await session.commit()
-            if result.rowcount and result.rowcount > 0:
-                return nonce
-            return None
-
-    async def renew_heartbeat(self, run_id: str, lease_nonce: str) -> bool:
-        """Update heartbeat. Returns False if nonce doesn't match (lease superseded)."""
-        from sqlalchemy import func, update
-
-        from dendrite.db.models import AgentRun
-
-        async with self._session_factory() as session:
-            stmt = (
-                update(AgentRun)
-                .where(AgentRun.id == run_id, AgentRun.lease_nonce == lease_nonce)
-                .values(heartbeat_at=func.now())
-            )
-            result = await session.execute(stmt)
-            await session.commit()
-            return bool(result.rowcount and result.rowcount > 0)
-
-    async def find_stale_runs(self, threshold_seconds: int) -> list[str]:
-        """Find running runs with stale heartbeats."""
-        import datetime as _dt
-
-        from sqlalchemy import select
-
-        from dendrite.db.models import AgentRun
-
-        cutoff = _dt.datetime.now(_dt.UTC).replace(tzinfo=None) - _dt.timedelta(
-            seconds=threshold_seconds
-        )
-        async with self._session_factory() as session:
-            stmt = select(AgentRun.id).where(
-                AgentRun.status == "running",
-                AgentRun.executor_id.is_not(None),
-                AgentRun.heartbeat_at < cutoff,
-            )
-            result = await session.execute(stmt)
-            return [row[0] for row in result.all()]
-
-    async def reclaim_stale_run(self, run_id: str) -> bool:
-        """Re-queue a stale run. Returns True if re-queued, False if retry limit hit.
-
-        Atomic: only reclaims rows that are currently running with a non-null
-        executor. Uses SELECT ... FOR UPDATE to prevent concurrent sweepers
-        from racing on the same row.
-        """
-        from sqlalchemy import func, select, update
-
-        from dendrite.db.models import AgentRun
-
-        async with self._session_factory() as session:
-            # Load current state with row lock
-            stmt = (
-                select(AgentRun.retry_count, AgentRun.max_retries, AgentRun.status)
-                .where(AgentRun.id == run_id)
-                .with_for_update()
-            )
-            result = await session.execute(stmt)
-            row = result.one_or_none()
-            if row is None:
-                return False
-
-            retry_count, max_retries, status = row
-
-            # Only reclaim running runs with an executor (stale)
-            if status != "running":
-                return False
-
-            if retry_count >= max_retries:
-                # Give up — mark as error
-                await session.execute(
-                    update(AgentRun)
-                    .where(
-                        AgentRun.id == run_id,
-                        AgentRun.status == "running",
-                    )
-                    .values(
-                        status="error",
-                        error=f"Executor crashed after {retry_count} recovery attempts",
-                        executor_id=None,
-                        lease_nonce=None,
-                        heartbeat_at=None,
-                        pause_data=None,
-                        updated_at=func.now(),
-                    )
-                )
-                await session.commit()
-                return False
-
-            # Re-queue as pending
-            await session.execute(
-                update(AgentRun)
-                .where(
-                    AgentRun.id == run_id,
-                    AgentRun.status == "running",
-                )
-                .values(
-                    status="pending",
-                    executor_id=None,
-                    lease_nonce=None,
-                    heartbeat_at=None,
-                    retry_count=retry_count + 1,
-                    updated_at=func.now(),
-                )
-            )
-            await session.commit()
-            return True
-
-    async def release_lease(self, run_id: str, lease_nonce: str) -> None:
-        """Clear lease state. Nonce-guarded — only current holder can release."""
-        from sqlalchemy import func, update
-
-        from dendrite.db.models import AgentRun
-
-        async with self._session_factory() as session:
-            stmt = (
-                update(AgentRun)
-                .where(AgentRun.id == run_id, AgentRun.lease_nonce == lease_nonce)
-                .values(
-                    executor_id=None,
-                    lease_nonce=None,
-                    heartbeat_at=None,
-                    updated_at=func.now(),
-                )
-            )
-            await session.execute(stmt)
-            await session.commit()
-
 
 def _run_to_record(row: AgentRun) -> RunRecord:
     """Convert an AgentRun ORM object to a RunRecord dataclass."""
@@ -1031,7 +742,6 @@ def _run_to_record(row: AgentRun) -> RunRecord:
         total_output_tokens=row.total_output_tokens,
         total_cost_usd=float(row.total_cost_usd) if row.total_cost_usd is not None else None,
         meta=row.meta,
-        retry_count=row.retry_count,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

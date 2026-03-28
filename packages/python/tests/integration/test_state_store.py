@@ -80,7 +80,7 @@ class TestCreateAndGetRun:
         assert record is not None
         assert record.id == "run_1"
         assert record.agent_name == "TestAgent"
-        assert record.status == "pending"
+        assert record.status == "running"
         assert record.input_data == {"input": "hello"}
         assert record.model == "claude-sonnet"
         assert record.strategy == "NativeToolCalling"
@@ -557,24 +557,25 @@ class TestPauseResume:
         assert await store.get_pause_state("nonexistent") is None
 
     async def test_claim_paused_run_succeeds(self, store) -> None:
-        """claim_paused_run transitions WAITING → RUNNING atomically and returns nonce."""
+        """claim_paused_run transitions WAITING → RUNNING atomically."""
         await store.create_run("run_cl", "Agent")
         await store.pause_run("run_cl", status="waiting_client_tool", pause_data={"x": 1})
 
-        nonce = await store.claim_paused_run("run_cl", expected_status="waiting_client_tool")
-        assert nonce is not None
+        claimed = await store.claim_paused_run("run_cl", expected_status="waiting_client_tool")
+        assert claimed is True
 
         record = await store.get_run("run_cl")
         assert record is not None
         assert record.status == "running"
 
     async def test_claim_paused_run_fails_wrong_status(self, store) -> None:
-        """claim_paused_run returns None if status doesn't match."""
+        """claim_paused_run returns False if status doesn't match."""
         await store.create_run("run_cf", "Agent")
         await store.pause_run("run_cf", status="waiting_client_tool", pause_data={"x": 1})
 
-        nonce = await store.claim_paused_run("run_cf", expected_status="waiting_human_input")
-        assert nonce is None
+        # Try to claim with wrong expected status
+        claimed = await store.claim_paused_run("run_cf", expected_status="waiting_human_input")
+        assert claimed is False
 
         # Status unchanged
         record = await store.get_run("run_cf")
@@ -582,16 +583,16 @@ class TestPauseResume:
         assert record.status == "waiting_client_tool"
 
     async def test_double_claim_fails(self, store) -> None:
-        """Second claim on the same run returns None — atomic CAS."""
+        """Second claim on the same run returns False — atomic CAS."""
         await store.create_run("run_dc", "Agent")
         await store.pause_run("run_dc", status="waiting_client_tool", pause_data={"x": 1})
 
-        nonce1 = await store.claim_paused_run("run_dc", expected_status="waiting_client_tool")
-        assert nonce1 is not None
+        claimed1 = await store.claim_paused_run("run_dc", expected_status="waiting_client_tool")
+        assert claimed1 is True
 
         # Second claim fails — status is now 'running', not 'waiting_client_tool'
-        nonce2 = await store.claim_paused_run("run_dc", expected_status="waiting_client_tool")
-        assert nonce2 is None
+        claimed2 = await store.claim_paused_run("run_dc", expected_status="waiting_client_tool")
+        assert claimed2 is False
 
     async def test_finalize_clears_pause_data(self, store) -> None:
         """finalize_run sets pause_data to None."""

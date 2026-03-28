@@ -225,24 +225,13 @@ async def normalize_timeline(
     if run_record is None:
         return None
 
-    # 1b. Load traces early — needed for input_text derivation and enrichment
-    traces = await state_store.get_traces(run_id)
-
-    # Derive visible input from the first USER trace (already redacted).
-    # input_data is private execution state and must not be surfaced.
-    first_user_text: str | None = None
-    for trace in traces:
-        if trace.role == "user":
-            first_user_text = trace.content
-            break
-
     summary = RunSummary(
         run_id=run_record.id,
         agent_name=run_record.agent_name,
         status=run_record.status,
         model=run_record.model,
         strategy=run_record.strategy,
-        input_text=first_user_text,
+        input_text=run_record.input_data.get("input") if run_record.input_data else None,
         answer=run_record.answer,
         error=run_record.error,
         iteration_count=run_record.iteration_count,
@@ -253,8 +242,9 @@ async def normalize_timeline(
         updated_at=run_record.updated_at,
     )
 
-    # 2. Load remaining data sources (traces already loaded above)
+    # 2. Load all data sources
     events = await state_store.get_run_events(run_id)
+    traces = await state_store.get_traces(run_id)
     tool_calls = await state_store.get_tool_calls(run_id)
 
     # 3. Build lookup indexes for enrichment

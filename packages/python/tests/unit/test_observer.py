@@ -30,14 +30,7 @@ class MockStateStore:
     _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     async def save_trace(
-        self,
-        run_id: str,
-        role: str,
-        content: str,
-        *,
-        order_index: int,
-        meta: Any = None,
-        **kwargs: Any,
+        self, run_id: str, role: str, content: str, *, order_index: int, meta: Any = None
     ) -> None:
         self.traces.append(
             {
@@ -54,9 +47,6 @@ class MockStateStore:
 
     async def save_usage(self, run_id: str, **kwargs: Any) -> None:
         self.usages.append({"run_id": run_id, **kwargs})
-
-    async def save_llm_interaction(self, run_id: str, **kwargs: Any) -> None:
-        pass  # Accepted but not recorded in this mock
 
     async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
         self._events.setdefault(run_id, []).append(kwargs)
