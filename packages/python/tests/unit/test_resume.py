@@ -568,3 +568,34 @@ class TestResumeWithInput:
                 agent=agent,
                 provider=MockLLM([]),
             )
+
+
+class TestAgentIdentityOnResume:
+    """H-003: resume must verify agent_name matches the paused run."""
+
+    async def test_mismatched_agent_name_raises(self) -> None:
+        """Resume with a different agent name fails closed."""
+        agent_a = _make_agent(name="AgentA")
+        store = RecordingStateStore()
+
+        # Create a paused run under AgentA
+        tc = ToolCall(name="read_range", params={"sheet": "S1"}, provider_tool_call_id="t1")
+        llm = MockLLM([LLMResponse(tool_calls=[tc]), LLMResponse(text="done")])
+        r = await run(agent_a, provider=llm, user_input="Go", state_store=store)
+        assert r.status == RunStatus.WAITING_CLIENT_TOOL
+
+        # Try to resume with AgentB
+        agent_b = _make_agent(name="AgentB")
+        tr = ToolResult(
+            name="read_range",
+            call_id=r.meta["pause_state"].pending_tool_calls[0].id,
+            payload='"data"',
+        )
+        with pytest.raises(ValueError, match="Agent name mismatch"):
+            await resume(
+                r.run_id,
+                [tr],
+                state_store=store,
+                agent=agent_b,
+                provider=MockLLM([LLMResponse(text="done")]),
+            )

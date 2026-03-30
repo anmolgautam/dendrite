@@ -1,5 +1,9 @@
 """Bridge — mountable HTTP transport for paused-run interaction.
 
+.. warning:: **Experimental.** The bridge is functional for local development
+   and prototyping but has known reliability gaps that make it unsuitable for
+   production pause/resume infrastructure without additional hardening.
+
 Provides ``bridge(agent)`` which returns a FastAPI sub-app with endpoints
 for submitting tool results, clarification input, SSE streaming, polling,
 and cancellation. The bridge is a **paused-run interaction layer**, not a
@@ -21,14 +25,16 @@ Usage::
     transport = bridge(agent)
     app.mount("/dendrite", transport)
 
-Known gaps (G2):
-  - No ``POST /runs`` — developer starts runs via ``agent.run()``.
+Known gaps:
+  - **No crash recovery (H-001):** if the process dies after
+    ``submit_and_claim`` succeeds but before the resume loop completes,
+    the run is stuck in RUNNING. Requires a stale-run sweep to fix.
+  - **In-memory coordination (H-024):** SSE queues and task tracking
+    are process-local. Process restarts lose live transport state.
+  - **No POST /runs:** developer starts runs via ``agent.run()``.
     Initial-run SSE and cancellation are not bridge-managed.
-  - No token-level streaming — SSE delivers orchestration events
+  - **No token-level streaming:** SSE delivers orchestration events
     (step, tool call, completion), not LLM token deltas.
-  - Crash-after-claim: if the process dies after ``submit_and_claim``
-    succeeds but before the resume loop completes, the run is stuck
-    in RUNNING. Recovery requires a stale-run sweep (post-G2).
 """
 
 from __future__ import annotations
@@ -219,7 +225,7 @@ def bridge(
         queue = sse_queues[run_id]
 
         async def _resume_task() -> None:
-            transport_obs = TransportObserver(queue)
+            transport_obs = TransportObserver(queue, redact=agent._redact)
             try:
                 won = await store.submit_and_claim(
                     run_id,

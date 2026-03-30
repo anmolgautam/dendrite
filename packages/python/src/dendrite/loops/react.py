@@ -418,9 +418,13 @@ async def _execute_tool(
 
         duration_ms = int((time.monotonic() - start) * 1000)
         try:
-            payload = json.dumps(result, default=str)
-        except (TypeError, ValueError):
-            payload = json.dumps(str(result))
+            payload = json.dumps(result)
+        except (TypeError, ValueError) as ser_err:
+            raise TypeError(
+                f"Tool '{tool_call.name}' returned a non-JSON-serializable value: "
+                f"{type(result).__name__}. Tool return values must be JSON-serializable "
+                f"(str, int, float, bool, list, dict, or None)."
+            ) from ser_err
 
         return ToolResult(
             name=tool_call.name,

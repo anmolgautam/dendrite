@@ -29,14 +29,21 @@ class TestToolDecorator:
         td = get_tool_def(read_range)
         assert td.target == ToolTarget.CLIENT
 
-    def test_human_tool(self) -> None:
-        @tool(target="human")
-        async def ask_user(question: str) -> str:
-            """Ask user a question."""
-            pass
+    def test_human_target_rejected(self) -> None:
+        with pytest.raises(ValueError, match="not supported"):
 
-        td = get_tool_def(ask_user)
-        assert td.target == ToolTarget.HUMAN
+            @tool(target="human")
+            async def ask_user(question: str) -> str:
+                """Ask user a question."""
+                pass
+
+    def test_agent_target_rejected(self) -> None:
+        with pytest.raises(ValueError, match="not supported"):
+
+            @tool(target="agent")
+            async def delegate(task: str) -> str:
+                """Delegate to sub-agent."""
+                pass
 
     def test_default_target_is_server(self) -> None:
         @tool()

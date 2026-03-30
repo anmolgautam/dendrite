@@ -48,8 +48,8 @@ async def get_engine(url: str | None = None) -> AsyncEngine:
     For SQLite, auto-creates all tables on first call.
     For Postgres, tables must exist via Alembic migrations.
 
-    Thread-safe: uses asyncio.Lock to prevent duplicate engine creation
-    when multiple coroutines call this concurrently.
+    Thread-safe: uses threading.Lock with double-check pattern to prevent
+    duplicate engine creation from concurrent calls.
     """
     global _engine, _engine_url, _session_factory  # noqa: PLW0603
     resolved_url = url or get_database_url()

@@ -397,6 +397,14 @@ async def _resume_core(
         raise ValueError(f"Run '{run_id}' has no pause state — cannot resume.")
     pause_state = PauseState.from_dict(raw_pause)
 
+    # 1b. Verify agent identity — fail closed on mismatch (H-003)
+    if pause_state.agent_name and pause_state.agent_name != agent.name:
+        raise ValueError(
+            f"Agent name mismatch: run '{run_id}' was paused by "
+            f"'{pause_state.agent_name}', but resume called with "
+            f"'{agent.name}'. This can cause state corruption."
+        )
+
     # 2. Validate tool results BEFORE claiming (prevents stuck RUNNING on bad input)
     if tool_results is not None:
         pending_ids = {tc.id for tc in pause_state.pending_tool_calls}
@@ -618,6 +626,14 @@ async def resume_claimed(
         raise ValueError(
             f"Run '{run_id}' has no pause state after claim — "
             "this indicates a bug in submit_and_claim."
+        )
+
+    # 1b. Verify agent identity (H-003)
+    paused_agent = raw_pause.get("agent_name", "")
+    if paused_agent and paused_agent != agent.name:
+        raise ValueError(
+            f"Agent name mismatch: run '{run_id}' was paused by "
+            f"'{paused_agent}', but resume called with '{agent.name}'."
         )
 
     # 2. Detect submission type and extract data

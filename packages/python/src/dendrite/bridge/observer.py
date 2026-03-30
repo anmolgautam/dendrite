@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 from dendrite.loops.base import LoopObserver
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from dendrite.types import LLMResponse, Message, ToolCall, ToolResult
 
 
@@ -82,18 +84,33 @@ class TransportObserver(LoopObserver):
     The SSE endpoint reads from this queue and yields Server-Sent Events.
     Terminal events (run.completed, run.error, run.paused) are also buffered
     so late SSE subscribers can receive them.
+
+    Args:
+        queue: The asyncio.Queue to push events to.
+        redact: Optional redaction function. When provided, message content
+            is scrubbed before being pushed to the SSE queue — ensuring
+            the transport path has the same redaction posture as persistence.
     """
 
-    def __init__(self, queue: asyncio.Queue[ServerEvent]) -> None:
+    def __init__(
+        self,
+        queue: asyncio.Queue[ServerEvent],
+        *,
+        redact: Callable[[str], str] | None = None,
+    ) -> None:
         self._queue = queue
+        self._redact = redact
 
     async def on_message_appended(self, message: Message, iteration: int) -> None:
+        content = message.content[:500]
+        if self._redact:
+            content = self._redact(content)
         await self._queue.put(
             ServerEvent(
                 event="run.step",
                 data={
                     "role": message.role.value,
-                    "content": message.content[:500],  # Truncate for SSE
+                    "content": content,
                     "iteration": iteration,
                 },
             )

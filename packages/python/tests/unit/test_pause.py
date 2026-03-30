@@ -37,12 +37,6 @@ async def read_range(sheet: str) -> str:
     return "should never run"
 
 
-@tool(target="human")
-async def ask_user(question: str) -> str:
-    """Human tool — asks a clarifying question."""
-    return "should never run"
-
-
 def _make_agent(**overrides) -> Agent:
     defaults = {
         "prompt": "You are a test agent.",
@@ -77,24 +71,6 @@ class TestPauseBehavior:
         assert isinstance(pause_state, PauseState)
         assert len(pause_state.pending_tool_calls) == 1
         assert pause_state.pending_tool_calls[0].name == "read_range"
-
-    async def test_human_tool_pauses_loop(self) -> None:
-        """target=human also → WAITING_CLIENT_TOOL (D3)."""
-        tc = ToolCall(
-            name="ask_user", params={"question": "Which sheet?"}, provider_tool_call_id="t1"
-        )
-        llm = MockLLM([LLMResponse(tool_calls=[tc])])
-        agent = _make_agent(tools=[server_add, ask_user])
-
-        result = await ReActLoop().run(
-            agent=agent,
-            provider=llm,
-            strategy=NativeToolCalling(),
-            user_input="Help me",
-        )
-
-        assert result.status == RunStatus.WAITING_CLIENT_TOOL
-        assert result.meta["pause_state"].pending_tool_calls[0].name == "ask_user"
 
     async def test_mixed_tools_executes_server_pauses_client(self) -> None:
         """LLM calls [server_add, read_range] → server executes, client pending."""

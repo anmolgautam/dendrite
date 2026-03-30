@@ -76,17 +76,17 @@ Run them in order — each one builds on the previous:
 
 ```bash
 # 🧮 Example 1: Minimal agent with one tool
-dendrite run examples/01_hello_world.py -i "What is 15 + 27?"
+ANTHROPIC_API_KEY=sk-... python examples/01_hello_world.py
 
 # 💾 Example 2: Agent with persistence — traces saved to SQLite
-python examples/02_persistent_agent.py
+ANTHROPIC_API_KEY=sk-... python examples/02_persistent_agent.py
 
 # 🔍 Inspect what happened
 dendrite runs
 dendrite traces <run_id> --tools
 
 # ⏸️ Example 3: Client tool bridge — agent pauses for your input
-python examples/03_client_tools/server.py
+ANTHROPIC_API_KEY=sk-... python examples/03_client_tools/server.py
 # Open http://localhost:8000
 ```
 
@@ -101,7 +101,8 @@ The agent will call the server tool immediately, pause for the client tool, wait
 Create a Python file with three things — tools, an agent, and a run call:
 
 ```python
-from dendrite import Agent, tool, run
+import asyncio
+from dendrite import Agent, tool
 from dendrite.llm.anthropic import AnthropicProvider
 
 # 1. Define tools — plain async functions
@@ -110,24 +111,15 @@ async def my_tool(input: str) -> str:
     """Describe what this tool does — the LLM reads this."""
     return f"Result for {input}"
 
-# 2. Define an agent
-agent = Agent(
-    name="MyAgent",
-    model="claude-sonnet-4-6",
-    prompt="You are a helpful assistant. Use my_tool when needed.",
-    tools=[my_tool],
-)
-
-# 3. Run it
-import asyncio
-
+# 2. Create agent with provider and run it
 async def main():
-    provider = AnthropicProvider(
-        api_key="sk-ant-...",
-        model=agent.model,
-    )
-    result = await run(agent, provider=provider, user_input="Do the thing")
-    print(result.answer)
+    async with Agent(
+        provider=AnthropicProvider(model="claude-sonnet-4-6"),
+        prompt="You are a helpful assistant. Use my_tool when needed.",
+        tools=[my_tool],
+    ) as agent:
+        result = await agent.run("Do the thing")
+        print(result.answer)
 
 asyncio.run(main())
 ```
@@ -135,13 +127,7 @@ asyncio.run(main())
 Run it with:
 
 ```bash
-python my_agent.py
-```
-
-Or use the CLI (auto-detects the agent in the file):
-
-```bash
-dendrite run my_agent.py -i "Do the thing"
+ANTHROPIC_API_KEY=sk-... python my_agent.py
 ```
 
 See `examples/01_hello_world.py` as a minimal template.
@@ -206,7 +192,7 @@ async def read_excel_range(sheet: str, range: str) -> str:
     return ""
 ```
 
-Mount the bridge for HTTP-based pause/resume:
+Mount the bridge for HTTP-based pause/resume *(experimental)*:
 
 ```python
 from dendrite import Agent, bridge
@@ -535,7 +521,7 @@ packages/python/
 | CLI (traces, runs, db, dashboard) | ✅ Shipped |
 | Token usage tracking + redaction | ✅ Shipped |
 | Pause/resume for client tools | ✅ Shipped |
-| Bridge transport (SSE + persist-first handoff) | ✅ Shipped |
+| Bridge transport (SSE + persist-first handoff) | ⚠️ Experimental |
 | Run-scoped HMAC auth | ✅ Shipped |
 | Agent API (provider, database_url, run/resume) | ✅ Shipped |
 | Token-level streaming (agent.stream()) | 🔜 Planned |

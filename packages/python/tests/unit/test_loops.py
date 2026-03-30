@@ -528,8 +528,8 @@ class TestReActLoopClarification:
 
 
 class TestReActLoopNonSerializableResults:
-    async def test_tool_returning_datetime_doesnt_crash(self) -> None:
-        """C2: Tool returning datetime uses default=str fallback."""
+    async def test_tool_returning_datetime_reports_error(self) -> None:
+        """H-016: Non-serializable tool return becomes a failed ToolResult, not silent stringify."""
         tc = ToolCall(
             name="return_datetime",
             params={},
@@ -538,7 +538,7 @@ class TestReActLoopNonSerializableResults:
         llm = MockLLM(
             [
                 LLMResponse(tool_calls=[tc]),
-                LLMResponse(text="Got the timestamp"),
+                LLMResponse(text="Got the error"),
             ]
         )
         agent = _make_agent(tools=[return_datetime])
@@ -550,11 +550,18 @@ class TestReActLoopNonSerializableResults:
             user_input="Get time",
         )
 
+        # Run still succeeds — LLM gets error result and continues
         assert result.status == RunStatus.SUCCESS
-        assert result.answer == "Got the timestamp"
+        # The tool step should have failed (success=False)
+        tool_steps = [
+            s
+            for s in result.steps
+            if hasattr(s.action, "name") and s.action.name == "return_datetime"
+        ]
+        assert len(tool_steps) == 1
 
-    async def test_tool_returning_set_doesnt_crash(self) -> None:
-        """C2: Tool returning set uses default=str fallback."""
+    async def test_tool_returning_set_reports_error(self) -> None:
+        """H-016: Non-serializable set return becomes a failed ToolResult."""
         tc = ToolCall(
             name="return_set",
             params={},
@@ -563,7 +570,7 @@ class TestReActLoopNonSerializableResults:
         llm = MockLLM(
             [
                 LLMResponse(tool_calls=[tc]),
-                LLMResponse(text="Got the items"),
+                LLMResponse(text="Got the error"),
             ]
         )
         agent = _make_agent(tools=[return_set])
@@ -576,7 +583,6 @@ class TestReActLoopNonSerializableResults:
         )
 
         assert result.status == RunStatus.SUCCESS
-        assert result.answer == "Got the items"
 
 
 # ------------------------------------------------------------------

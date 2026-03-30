@@ -10,7 +10,6 @@ from __future__ import annotations
 import inspect
 import json
 import typing
-import warnings
 from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
 
 if TYPE_CHECKING:
@@ -53,12 +52,21 @@ def tool(
                 f"Tool name '{name}' is not a valid Python identifier. "
                 f"Use a named function instead of a lambda or dynamic callable."
             )
+
+        resolved_target = ToolTarget(target)
+        if resolved_target not in (ToolTarget.SERVER, ToolTarget.CLIENT):
+            raise ValueError(
+                f"Tool target '{target}' is not supported. "
+                f"Only 'server' and 'client' are implemented. "
+                f"'human' and 'agent' are reserved for future use."
+            )
+
         schema = _generate_schema(fn)
         tool_def = ToolDef(
             name=name,
             description=(fn.__doc__ or "").strip(),
             parameters=schema,
-            target=ToolTarget(target),
+            target=resolved_target,
             parallel=parallel,
             priority=priority,
             max_calls_per_run=max_calls_per_run,
@@ -159,12 +167,11 @@ def _type_to_schema(hint: type) -> dict[str, Any]:
     if json_type:
         return {"type": json_type}
 
-    warnings.warn(
-        f"Type {hint!r} is not recognized by Dendrite schema generation; "
-        f"defaulting to {{'type': 'string'}}.",
-        stacklevel=2,
+    raise TypeError(
+        f"Type {hint!r} is not supported in Dendrite tool schemas. "
+        f"Supported types: str, int, float, bool, list, dict, and Optional variants. "
+        f"If this is a custom type, convert it to a supported type in the tool signature."
     )
-    return {"type": "string"}
 
 
 def _is_optional(hint: type) -> bool:

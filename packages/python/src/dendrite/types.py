@@ -127,12 +127,17 @@ class AgentStep:
 
 
 class ToolTarget(StrEnum):
-    """Where a tool executes."""
+    """Where a tool executes.
+
+    Only SERVER and CLIENT are implemented. HUMAN and AGENT are reserved
+    for future use — the loop currently treats them as CLIENT (pauses).
+    """
 
     SERVER = "server"  # Runs on the backend (default)
     CLIENT = "client"  # Shipped to client for execution
-    HUMAN = "human"  # Requires human response
-    AGENT = "agent"  # Delegated to a sub-agent
+    # Reserved — not yet implemented. Loop treats as CLIENT today.
+    HUMAN = "human"
+    AGENT = "agent"
 
 
 @dataclass(frozen=True)
@@ -142,19 +147,17 @@ class ToolDef:
     Created by the @tool decorator. Used by strategies to describe tools
     to the LLM, and by the executor to dispatch tool calls.
 
-    Note: parallel, priority, and max_calls_per_run are declared in the
-    type system but not yet enforced by the runtime. Sprint 1 executes
-    all tool calls sequentially in request order. Enforcement is planned
-    for a future sprint.
+    Note: parallel, priority, and max_calls_per_run are reserved for
+    future use — not enforced by the runtime. Tools execute sequentially.
     """
 
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema for params
     target: ToolTarget = ToolTarget.SERVER
-    parallel: bool = True  # Declared, not yet enforced
-    priority: int = 0  # Declared, not yet enforced
-    max_calls_per_run: int | None = None  # Declared, not yet enforced
+    parallel: bool = True  # Reserved — not enforced
+    priority: int = 0  # Reserved — not enforced
+    max_calls_per_run: int | None = None  # Reserved — not enforced
     timeout_seconds: float = 30.0  # Enforced by ReActLoop via asyncio.wait_for
 
 
@@ -224,13 +227,16 @@ class ProviderCapabilities:
 
 
 class RunStatus(StrEnum):
-    """Status of an agent run."""
+    """Status of an agent run.
+
+    WAITING_APPROVAL is reserved for future use — not implemented.
+    """
 
     PENDING = "pending"
     RUNNING = "running"
     WAITING_CLIENT_TOOL = "waiting_client_tool"
     WAITING_HUMAN_INPUT = "waiting_human_input"
-    WAITING_APPROVAL = "waiting_approval"
+    WAITING_APPROVAL = "waiting_approval"  # Reserved — not yet implemented
     SUCCESS = "success"
     ERROR = "error"
     CANCELLED = "cancelled"

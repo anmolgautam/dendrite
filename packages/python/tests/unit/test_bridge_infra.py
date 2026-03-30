@@ -25,6 +25,30 @@ class TestTransportObserver:
         assert event.data["role"] == "user"
         assert event.data["content"] == "hello"
 
+    async def test_redaction_applied_to_content(self) -> None:
+        """H-006: TransportObserver redacts message content when redact is set."""
+        queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
+        redact = lambda text: text.replace("secret-key-123", "[REDACTED]")  # noqa: E731
+        obs = TransportObserver(queue, redact=redact)
+
+        msg = Message(role=Role.ASSISTANT, content="The API key is secret-key-123")
+        await obs.on_message_appended(msg, iteration=0)
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert "secret-key-123" not in event.data["content"]
+        assert "[REDACTED]" in event.data["content"]
+
+    async def test_no_redaction_when_none(self) -> None:
+        """Without redact, content passes through unchanged."""
+        queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
+        obs = TransportObserver(queue)
+
+        msg = Message(role=Role.ASSISTANT, content="The API key is secret-key-123")
+        await obs.on_message_appended(msg, iteration=0)
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert "secret-key-123" in event.data["content"]
+
     async def test_tool_completion_event(self) -> None:
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
         obs = TransportObserver(queue)
