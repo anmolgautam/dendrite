@@ -195,6 +195,13 @@ class NormalizedTimeline:
 # ------------------------------------------------------------------
 
 
+def _utc_iso(ts: datetime | None) -> str | None:
+    """Format a naive UTC datetime as ISO 8601 with Z suffix."""
+    if ts is None:
+        return None
+    return ts.isoformat() + "Z"
+
+
 def _compute_wait_ms(paused_at: datetime | None, resumed_at: datetime | None) -> int | None:
     """Compute wait duration in ms from pause/resume timestamps."""
     if paused_at is None or resumed_at is None:
@@ -270,7 +277,7 @@ async def normalize_timeline(
             "content": trace.content,
             "order_index": trace.order_index,
             "meta": trace.meta,
-            "created_at": str(trace.created_at) if trace.created_at else None,
+            "created_at": _utc_iso(trace.created_at),
         }
         messages_by_iteration.setdefault(iteration, []).append(msg)
 
@@ -450,8 +457,8 @@ def _summary_to_dict(s: RunSummary) -> dict[str, Any]:
         "total_input_tokens": s.total_input_tokens,
         "total_output_tokens": s.total_output_tokens,
         "total_cost_usd": s.total_cost_usd,
-        "created_at": str(s.created_at) if s.created_at else None,
-        "updated_at": str(s.updated_at) if s.updated_at else None,
+        "created_at": _utc_iso(s.created_at),
+        "updated_at": _utc_iso(s.updated_at),
     }
 
 
@@ -462,7 +469,7 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
             "type": node.type,
             "sequence_index": node.sequence_index,
             "agent_name": node.agent_name,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
         }
     if isinstance(node, LLMCallNode):
         return {
@@ -474,7 +481,7 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
             "cost_usd": node.cost_usd,
             "model": node.model,
             "has_tool_calls": node.has_tool_calls,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
             "assistant_text": node.assistant_text,
         }
     if isinstance(node, ToolCallNode):
@@ -487,7 +494,7 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
             "target": node.target,
             "success": node.success,
             "duration_ms": node.duration_ms,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
             "params": node.params,
             "result": node.result,
             "error_message": node.error_message,
@@ -506,8 +513,8 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
                 }
                 for tc in node.pending_tool_calls
             ],
-            "paused_at": str(node.paused_at) if node.paused_at else None,
-            "resumed_at": str(node.resumed_at) if node.resumed_at else None,
+            "paused_at": _utc_iso(node.paused_at),
+            "resumed_at": _utc_iso(node.resumed_at),
             "wait_duration_ms": node.wait_duration_ms,
             "submitted_results": [
                 {
@@ -524,19 +531,19 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
             "type": node.type,
             "sequence_index": node.sequence_index,
             "status": node.status,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
         }
     if isinstance(node, ErrorNode):
         return {
             "type": node.type,
             "sequence_index": node.sequence_index,
             "error": node.error,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
         }
     if isinstance(node, CancelledNode):
         return {
             "type": node.type,
             "sequence_index": node.sequence_index,
-            "timestamp": str(node.timestamp) if node.timestamp else None,
+            "timestamp": _utc_iso(node.timestamp),
         }
     return {"type": "unknown"}

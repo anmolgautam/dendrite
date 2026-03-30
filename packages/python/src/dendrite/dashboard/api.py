@@ -20,7 +20,21 @@ from dendrite.dashboard.normalizer import normalize_timeline, timeline_to_dict
 _STATIC_DIR = Path(__file__).parent / "static"
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from dendrite.runtime.state import StateStore
+
+
+def _utc_iso(ts: datetime | None) -> str | None:
+    """Format a naive UTC datetime as ISO 8601 with Z suffix.
+
+    SQLite CURRENT_TIMESTAMP stores UTC but as a naive datetime.
+    Appending 'Z' tells the browser the timestamp is UTC so relative
+    time calculations (e.g. "5m ago") are correct in any timezone.
+    """
+    if ts is None:
+        return None
+    return ts.isoformat() + "Z"
 
 
 def create_dashboard_api(state_store: StateStore) -> FastAPI:
@@ -96,8 +110,8 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
                     "total_cost_usd": r.total_cost_usd,
                     "model": r.model,
                     "pause_count": pause_count,
-                    "created_at": str(r.created_at) if r.created_at else None,
-                    "updated_at": str(r.updated_at) if r.updated_at else None,
+                    "created_at": _utc_iso(r.created_at),
+                    "updated_at": _utc_iso(r.updated_at),
                 }
             )
 
@@ -133,7 +147,7 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
                     "iteration_index": e.iteration_index,
                     "correlation_id": e.correlation_id,
                     "data": e.data,
-                    "created_at": str(e.created_at) if e.created_at else None,
+                    "created_at": _utc_iso(e.created_at),
                 }
                 for e in events
             ]
@@ -155,7 +169,7 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
                     "content": t.content,
                     "order_index": t.order_index,
                     "meta": t.meta,
-                    "created_at": str(t.created_at) if t.created_at else None,
+                    "created_at": _utc_iso(t.created_at),
                 }
                 for t in traces
             ]
@@ -182,7 +196,7 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
                     "duration_ms": tc.duration_ms,
                     "iteration_index": tc.iteration_index,
                     "error_message": tc.error_message,
-                    "created_at": str(tc.created_at) if tc.created_at else None,
+                    "created_at": _utc_iso(tc.created_at),
                 }
                 for tc in tool_calls
             ]
@@ -211,7 +225,7 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
                     "output_tokens": i.output_tokens,
                     "cost_usd": i.cost_usd,
                     "duration_ms": i.duration_ms,
-                    "created_at": str(i.created_at) if i.created_at else None,
+                    "created_at": _utc_iso(i.created_at),
                 }
                 for i in interactions
             ]
