@@ -7,10 +7,21 @@ The Python framework for building agents that use tools, persist state, and paus
 ## 📦 Install
 
 ```bash
-pip install -e ".[all]"          # everything (Anthropic + OpenAI + DB + bridge)
-pip install -e ".[anthropic,db]" # just Anthropic + SQLite
-pip install -e ".[openai,db]"    # just OpenAI + SQLite
+pip install "dendrux[all]"            # everything (Anthropic + OpenAI + DB + bridge)
+pip install "dendrux[anthropic,db]"   # just Anthropic + SQLite
+pip install "dendrux[openai,db]"      # just OpenAI + SQLite
 ```
+
+<details>
+<summary>Development install (from source)</summary>
+
+```bash
+git clone https://github.com/dendrux/dendrux.git
+cd dendrux/packages/python
+pip install -e ".[dev,all]"
+```
+
+</details>
 
 ## 🚀 Quick Start
 
@@ -51,7 +62,7 @@ Dendrux works with multiple LLM providers. Swap one import — everything else s
 ### Anthropic (Claude)
 
 ```bash
-pip install -e ".[anthropic,db]"
+pip install "dendrux[anthropic,db]"
 ```
 
 ```python
@@ -66,7 +77,7 @@ provider = AnthropicProvider(model="claude-sonnet-4-6")
 Works with OpenAI and any compatible API — vLLM, SGLang, Groq, Together, Ollama.
 
 ```bash
-pip install -e ".[openai,db]"
+pip install "dendrux[openai,db]"
 ```
 
 ```python
@@ -422,8 +433,9 @@ Always use `async with Agent(...) as agent:` — this ensures the HTTP client an
 ## 🧑‍💻 Development
 
 ```bash
-cd packages/python
-pip install -e ".[dev,db,anthropic,openai,bridge]"
+git clone https://github.com/dendrux/dendrux.git
+cd dendrux/packages/python
+pip install -e ".[dev,all]"
 make ci    # lint + typecheck + tests
 ```
 

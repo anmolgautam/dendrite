@@ -7,9 +7,9 @@
 ## Install
 
 ```bash
-pip install -e ".[all]"                # Everything
-pip install -e ".[anthropic,db]"       # Just Anthropic + SQLite
-pip install -e ".[openai,db]"          # Just OpenAI + SQLite
+pip install "dendrux[all]"              # Everything
+pip install "dendrux[anthropic,db]"     # Just Anthropic + SQLite
+pip install "dendrux[openai,db]"        # Just OpenAI + SQLite
 ```
 
 ## Quick Example
