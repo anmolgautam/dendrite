@@ -79,6 +79,7 @@ class AnthropicProvider(LLMProvider):
             max_retries=max_retries,
         )
         self._model = model
+        self._timeout = timeout
 
     @property
     def model(self) -> str:
@@ -128,7 +129,15 @@ class AnthropicProvider(LLMProvider):
         # Capture provider request payload before the call (exclude non-serializable NOT_GIVEN)
         captured_request = {k: v for k, v in api_kwargs.items() if v is not anthropic.NOT_GIVEN}
 
-        response = await self._client.messages.create(**api_kwargs)
+        try:
+            response = await self._client.messages.create(**api_kwargs)
+        except anthropic.APITimeoutError:
+            raise TimeoutError(
+                f"LLM request timed out after {self._timeout}s. "
+                f"The model may need more time for large outputs. "
+                f"Increase timeout: AnthropicProvider(model=..., timeout=300)"
+            ) from None
+
         llm_response = self._normalize_response(response)
 
         # Attach adapter-boundary payloads for evidence layer
