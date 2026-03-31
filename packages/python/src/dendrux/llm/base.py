@@ -111,4 +111,6 @@ class LLMProvider(ABC):
                     tool_call=tc,
                     tool_name=tc.name,
                 )
-        yield StreamEvent(type=StreamEventType.DONE)
+        # DONE always carries the full LLMResponse so the loop can
+        # consume usage stats and provider payloads uniformly.
+        yield StreamEvent(type=StreamEventType.DONE, raw=response)

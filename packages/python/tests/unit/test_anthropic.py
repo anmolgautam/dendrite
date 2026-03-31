@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from anthropic.types import (
@@ -18,6 +19,7 @@ from dendrux.llm.anthropic import AnthropicProvider
 from dendrux.types import (
     Message,
     Role,
+    StreamEventType,
     ToolCall,
     ToolDef,
 )
@@ -59,11 +61,11 @@ class TestCapabilities:
     def test_declares_tool_call_ids(self, provider: AnthropicProvider) -> None:
         assert provider.capabilities.supports_tool_call_ids is True
 
-    def test_streaming_not_implemented(self, provider: AnthropicProvider) -> None:
-        assert provider.capabilities.supports_streaming is False
+    def test_streaming_implemented(self, provider: AnthropicProvider) -> None:
+        assert provider.capabilities.supports_streaming is True
 
-    def test_streaming_tool_deltas_not_implemented(self, provider: AnthropicProvider) -> None:
-        assert provider.capabilities.supports_streaming_tool_deltas is False
+    def test_streaming_tool_deltas_implemented(self, provider: AnthropicProvider) -> None:
+        assert provider.capabilities.supports_streaming_tool_deltas is True
 
     def test_thinking_not_implemented(self, provider: AnthropicProvider) -> None:
         assert provider.capabilities.supports_thinking is False
@@ -620,3 +622,274 @@ class TestProviderHardening:
 
         with pytest.raises(ValueError, match="TOOL message missing call_id"):
             provider._convert_messages([msg])
+
+
+# ------------------------------------------------------------------
+# Streaming — complete_stream()
+# ------------------------------------------------------------------
+
+
+# Lightweight fakes for Anthropic streaming events.
+# These mirror the shape that anthropic SDK yields from messages.stream().
+
+
+@dataclass
+class _FakeContentBlock:
+    type: str
+    name: str | None = None
+    id: str | None = None
+    text: str | None = None
+
+
+@dataclass
+class _FakeDelta:
+    type: str
+    text: str | None = None
+    partial_json: str | None = None
+
+
+@dataclass
+class _FakeStreamEvent:
+    type: str
+    content_block: _FakeContentBlock | None = None
+    delta: _FakeDelta | None = None
+    index: int = 0
+
+
+class _FakeStream:
+    """Async iterator that replays a list of events, mimicking AsyncMessageStream."""
+
+    def __init__(self, events: list[_FakeStreamEvent], final_message: AnthropicMessage):
+        self._events = events
+        self._final_message = final_message
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        pass
+
+    def __aiter__(self):
+        return self._iter_events()
+
+    async def _iter_events(self):
+        for event in self._events:
+            yield event
+
+    async def get_final_message(self) -> AnthropicMessage:
+        return self._final_message
+
+
+class TestCompleteStream:
+    """Tests for AnthropicProvider.complete_stream()."""
+
+    @pytest.fixture
+    def provider(self) -> AnthropicProvider:
+        return AnthropicProvider(api_key="sk-test", model="claude-sonnet-4-6")
+
+    @staticmethod
+    def _text_events(chunks: list[str]) -> list[_FakeStreamEvent]:
+        """Build stream events for a text-only response."""
+        events = [
+            _FakeStreamEvent(
+                type="content_block_start",
+                content_block=_FakeContentBlock(type="text"),
+            ),
+        ]
+        for chunk in chunks:
+            events.append(
+                _FakeStreamEvent(
+                    type="content_block_delta",
+                    delta=_FakeDelta(type="text_delta", text=chunk),
+                )
+            )
+        events.append(_FakeStreamEvent(type="content_block_stop"))
+        return events
+
+    @staticmethod
+    def _tool_events(
+        name: str, tool_id: str, json_parts: list[str]
+    ) -> list[_FakeStreamEvent]:
+        """Build stream events for a tool call."""
+        events = [
+            _FakeStreamEvent(
+                type="content_block_start",
+                content_block=_FakeContentBlock(type="tool_use", name=name, id=tool_id),
+            ),
+        ]
+        for part in json_parts:
+            events.append(
+                _FakeStreamEvent(
+                    type="content_block_delta",
+                    delta=_FakeDelta(type="input_json_delta", partial_json=part),
+                )
+            )
+        events.append(_FakeStreamEvent(type="content_block_stop"))
+        return events
+
+    async def test_text_only_stream(self, provider: AnthropicProvider) -> None:
+        """Text-only response yields TEXT_DELTA events + DONE."""
+        final_msg = _make_anthropic_response(
+            [TextBlock(type="text", text="Hello world")],
+        )
+        events = self._text_events(["Hello", " world"])
+        fake_stream = _FakeStream(events, final_msg)
+
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        collected = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")]
+        ):
+            collected.append(event)
+
+        # Should have: 2 text deltas + 1 DONE
+        assert len(collected) == 3
+        assert collected[0].type == StreamEventType.TEXT_DELTA
+        assert collected[0].text == "Hello"
+        assert collected[1].type == StreamEventType.TEXT_DELTA
+        assert collected[1].text == " world"
+        assert collected[2].type == StreamEventType.DONE
+        # DONE carries the full LLMResponse
+        llm_response = collected[2].raw
+        assert llm_response.text == "Hello world"
+        assert llm_response.tool_calls is None
+        assert llm_response.usage.input_tokens == 100
+
+    async def test_tool_call_stream(self, provider: AnthropicProvider) -> None:
+        """Tool call response yields TOOL_USE_START + TOOL_USE_END + DONE."""
+        final_msg = _make_anthropic_response(
+            [ToolUseBlock(type="tool_use", id="toolu_123", name="add", input={"a": 1, "b": 2})],
+            stop_reason="tool_use",
+        )
+        events = self._tool_events("add", "toolu_123", ['{"a":', " 1, ", '"b": 2}'])
+        fake_stream = _FakeStream(events, final_msg)
+
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        collected = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Add 1 and 2")]
+        ):
+            collected.append(event)
+
+        # TOOL_USE_START + TOOL_USE_END + DONE
+        assert len(collected) == 3
+        assert collected[0].type == StreamEventType.TOOL_USE_START
+        assert collected[0].tool_name == "add"
+        assert collected[1].type == StreamEventType.TOOL_USE_END
+        assert collected[1].tool_call.name == "add"
+        assert collected[1].tool_call.params == {"a": 1, "b": 2}
+        assert collected[1].tool_call.provider_tool_call_id == "toolu_123"
+        assert collected[2].type == StreamEventType.DONE
+
+    async def test_text_then_tool_stream(self, provider: AnthropicProvider) -> None:
+        """Mixed response: text first, then tool call."""
+        final_msg = _make_anthropic_response(
+            [
+                TextBlock(type="text", text="Let me calculate."),
+                ToolUseBlock(type="tool_use", id="toolu_456", name="add", input={"a": 15, "b": 27}),
+            ],
+            stop_reason="tool_use",
+        )
+        events = (
+            self._text_events(["Let me", " calculate."])
+            + self._tool_events("add", "toolu_456", ['{"a": 15, "b":', " 27}"])
+        )
+        fake_stream = _FakeStream(events, final_msg)
+
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        collected = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Add 15 and 27")]
+        ):
+            collected.append(event)
+
+        types = [e.type for e in collected]
+        assert types == [
+            StreamEventType.TEXT_DELTA,      # "Let me"
+            StreamEventType.TEXT_DELTA,      # " calculate."
+            StreamEventType.TOOL_USE_START,  # add starts
+            StreamEventType.TOOL_USE_END,    # add complete
+            StreamEventType.DONE,
+        ]
+        # Text accumulated correctly
+        assert collected[-1].raw.text == "Let me calculate."
+        # Tool call assembled correctly
+        tc = collected[3].tool_call
+        assert tc.name == "add"
+        assert tc.params == {"a": 15, "b": 27}
+
+    async def test_multiple_tool_calls_stream(self, provider: AnthropicProvider) -> None:
+        """Parallel tool calls in a single response."""
+        final_msg = _make_anthropic_response(
+            [
+                ToolUseBlock(type="tool_use", id="t1", name="add", input={"a": 1, "b": 2}),
+                ToolUseBlock(type="tool_use", id="t2", name="multiply", input={"x": 3, "y": 4}),
+            ],
+            stop_reason="tool_use",
+        )
+        events = (
+            self._tool_events("add", "t1", ['{"a": 1, "b": 2}'])
+            + self._tool_events("multiply", "t2", ['{"x": 3, "y": 4}'])
+        )
+        fake_stream = _FakeStream(events, final_msg)
+
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        collected = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Do both")]
+        ):
+            collected.append(event)
+
+        types = [e.type for e in collected]
+        assert types == [
+            StreamEventType.TOOL_USE_START,
+            StreamEventType.TOOL_USE_END,
+            StreamEventType.TOOL_USE_START,
+            StreamEventType.TOOL_USE_END,
+            StreamEventType.DONE,
+        ]
+        # Both tool calls in the final LLMResponse
+        llm_response = collected[-1].raw
+        assert len(llm_response.tool_calls) == 2
+
+    async def test_done_carries_usage_stats(self, provider: AnthropicProvider) -> None:
+        """DONE event carries correct usage stats from final message."""
+        final_msg = _make_anthropic_response(
+            [TextBlock(type="text", text="Hi")],
+            input_tokens=200,
+            output_tokens=75,
+        )
+        events = self._text_events(["Hi"])
+        fake_stream = _FakeStream(events, final_msg)
+
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        collected = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")]
+        ):
+            collected.append(event)
+
+        done = collected[-1]
+        assert done.type == StreamEventType.DONE
+        assert done.raw.usage.input_tokens == 200
+        assert done.raw.usage.output_tokens == 75
+        assert done.raw.usage.total_tokens == 275
+
+    async def test_stream_timeout_raises_clean_error(self, provider: AnthropicProvider) -> None:
+        """API timeout during streaming raises clean TimeoutError."""
+        import anthropic as anthropic_mod
+
+        provider._client.messages.stream = MagicMock(
+            side_effect=anthropic_mod.APITimeoutError(request=MagicMock())
+        )
+
+        with pytest.raises(TimeoutError, match="timed out"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")]
+            ):
+                pass

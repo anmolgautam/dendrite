@@ -458,11 +458,16 @@ def _usage_from_dict(d: dict[str, Any]) -> UsageStats:
 
 
 class StreamEventType(StrEnum):
-    """Types of events emitted during streaming LLM responses."""
+    """Types of events emitted during streaming LLM responses.
+
+    TEXT_DELTA: Incremental text token from the LLM.
+    TOOL_USE_START: A tool call block has begun (name known, args pending).
+    TOOL_USE_END: A tool call is fully assembled and ready to execute.
+    DONE: Stream finished. ``raw`` carries the full ``LLMResponse``.
+    """
 
     TEXT_DELTA = "text_delta"
     TOOL_USE_START = "tool_use_start"
-    TOOL_USE_DELTA = "tool_use_delta"
     TOOL_USE_END = "tool_use_end"
     DONE = "done"
 

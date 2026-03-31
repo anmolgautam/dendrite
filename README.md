@@ -341,6 +341,8 @@ dendrux db status               # Check migration status
 
 ### 📊 Dashboard
 
+> Requires the `bridge` extra: `pip install "dendrux[bridge]"` (included in `dendrux[all]`).
+
 ```bash
 dendrux dashboard               # Launch at http://localhost:8001
 dendrux dashboard --db ./my.db  # Point at a specific database

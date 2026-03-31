@@ -10,6 +10,7 @@ No business logic, no agent loop awareness. Just shape translation.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import anthropic
@@ -20,11 +21,15 @@ from dendrux.types import (
     LLMResponse,
     ProviderCapabilities,
     Role,
+    StreamEvent,
+    StreamEventType,
     ToolCall,
     UsageStats,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from dendrux.types import Message, ToolDef
 
 # Anthropic-specific kwargs that complete() will forward to the API.
@@ -54,10 +59,10 @@ class AnthropicProvider(LLMProvider):
     capabilities = ProviderCapabilities(
         supports_native_tools=True,
         supports_tool_call_ids=True,
-        supports_streaming=False,  # No complete_stream() override yet
-        supports_streaming_tool_deltas=False,
-        supports_thinking=False,  # Not implemented in Sprint 1
-        supports_multimodal=False,  # Not implemented in Sprint 1
+        supports_streaming=True,
+        supports_streaming_tool_deltas=True,
+        supports_thinking=False,  # Not implemented yet
+        supports_multimodal=False,  # Not implemented yet
         supports_system_prompt=True,
         supports_parallel_tool_calls=True,
         max_context_tokens=200_000,
@@ -111,16 +116,16 @@ class AnthropicProvider(LLMProvider):
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    async def complete(
+    def _build_api_kwargs(
         self,
         messages: list[Message],
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> LLMResponse:
-        """Send messages to Claude and return a normalized response.
+        tools: list[ToolDef] | None,
+        kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build Anthropic API kwargs from Dendrux messages and caller kwargs.
 
-        kwargs override constructor defaults (e.g. model, max_tokens).
-        Only Anthropic-supported kwargs are forwarded; unknown keys are ignored.
+        Returns (api_kwargs, captured_request) where captured_request is the
+        serializable subset for the evidence layer.
         """
         system_prompt, api_messages = self._convert_messages(messages)
         api_tools = self._convert_tools(tools) if tools else anthropic.NOT_GIVEN
@@ -133,19 +138,30 @@ class AnthropicProvider(LLMProvider):
             "tools": api_tools,
         }
 
-        # Apply constructor defaults for optional params (per-call kwargs override)
         if "temperature" in kwargs:
             api_kwargs["temperature"] = kwargs.pop("temperature")
         elif self._temperature is not None:
             api_kwargs["temperature"] = self._temperature
 
-        # Forward remaining supported kwargs — ignore the rest
         for key in _SUPPORTED_KWARGS - {"model", "max_tokens", "temperature"}:
             if key in kwargs:
                 api_kwargs[key] = kwargs.pop(key)
 
-        # Capture provider request payload before the call (exclude non-serializable NOT_GIVEN)
         captured_request = {k: v for k, v in api_kwargs.items() if v is not anthropic.NOT_GIVEN}
+        return api_kwargs, captured_request
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send messages to Claude and return a normalized response.
+
+        kwargs override constructor defaults (e.g. model, max_tokens).
+        Only Anthropic-supported kwargs are forwarded; unknown keys are ignored.
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
 
         try:
             response = await self._client.messages.create(**api_kwargs)
@@ -163,6 +179,108 @@ class AnthropicProvider(LLMProvider):
         llm_response.provider_response = response.model_dump()
 
         return llm_response
+
+    async def complete_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream LLM response as events, token by token.
+
+        Text deltas are yielded immediately as they arrive.
+        Tool call arguments are accumulated internally and yielded as
+        complete TOOL_USE_END events when each content block finishes.
+
+        At stream end, yields a DONE event carrying the full LLMResponse
+        (with usage stats and provider payloads) for the loop to consume.
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
+
+        # Accumulators for building the final LLMResponse
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        # Per-block state for tool call assembly
+        _current_tool_name: str | None = None
+        _current_tool_id: str | None = None
+        _current_tool_json_parts: list[str] = []
+
+        try:
+            async with self._client.messages.stream(**api_kwargs) as stream:
+                async for event in stream:
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if block.type == "tool_use":
+                            _current_tool_name = block.name
+                            _current_tool_id = block.id
+                            _current_tool_json_parts = []
+                            yield StreamEvent(
+                                type=StreamEventType.TOOL_USE_START,
+                                tool_name=block.name,
+                                tool_call_id=block.id,
+                            )
+
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            text_parts.append(delta.text)
+                            yield StreamEvent(
+                                type=StreamEventType.TEXT_DELTA,
+                                text=delta.text,
+                            )
+                        elif delta.type == "input_json_delta":
+                            _current_tool_json_parts.append(delta.partial_json)
+
+                    elif event.type == "content_block_stop":
+                        if _current_tool_name is not None:
+                            raw_json = "".join(_current_tool_json_parts)
+                            try:
+                                params = json.loads(raw_json) if raw_json else {}
+                            except json.JSONDecodeError:
+                                params = {}
+                            tc = ToolCall(
+                                name=_current_tool_name,
+                                params=params if isinstance(params, dict) else {},
+                                provider_tool_call_id=_current_tool_id,
+                            )
+                            tool_calls.append(tc)
+                            yield StreamEvent(
+                                type=StreamEventType.TOOL_USE_END,
+                                tool_call=tc,
+                                tool_name=tc.name,
+                                tool_call_id=_current_tool_id,
+                            )
+                            _current_tool_name = None
+                            _current_tool_id = None
+                            _current_tool_json_parts = []
+
+                # Get the final message for usage stats and provider response
+                final_message = await stream.get_final_message()
+
+        except anthropic.APITimeoutError:
+            raise TimeoutError(
+                f"LLM request timed out after {self._timeout}s. "
+                f"The model may need more time for large outputs. "
+                f"Increase timeout: AnthropicProvider(model=..., timeout=300)"
+            ) from None
+
+        usage = UsageStats(
+            input_tokens=final_message.usage.input_tokens,
+            output_tokens=final_message.usage.output_tokens,
+            total_tokens=final_message.usage.input_tokens + final_message.usage.output_tokens,
+        )
+
+        llm_response = LLMResponse(
+            text="".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls if tool_calls else None,
+            raw=final_message,
+            usage=usage,
+        )
+        llm_response.provider_request = captured_request
+        llm_response.provider_response = final_message.model_dump()
+
+        yield StreamEvent(type=StreamEventType.DONE, raw=llm_response)
 
     # ------------------------------------------------------------------
     # Outbound conversions: Dendrux → Anthropic
