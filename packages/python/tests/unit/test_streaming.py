@@ -1,4 +1,4 @@
-"""Tests for run-level streaming — agent.stream() and the run_stream pipeline.
+"""Tests for run-level streaming — agent.stream(), agent.resume_stream(), and the pipeline.
 
 Covers:
   - RunStream lifecycle (single-use, early break, idempotent cleanup)
@@ -6,6 +6,7 @@ Covers:
   - Error semantics (yield RUN_ERROR, no re-raise)
   - kwargs forwarding (agent → runner → loop → provider)
   - .text() convenience filter
+  - resume_stream (RUN_RESUMED first event, client tool round-trip)
 """
 
 from __future__ import annotations
@@ -19,13 +20,17 @@ from dendrux.llm.base import LLMProvider
 from dendrux.llm.mock import MockLLM
 from dendrux.types import (
     LLMResponse,
+    Message,
+    PauseState,
     ProviderCapabilities,
+    Role,
     RunEventType,
     RunStatus,
     RunStream,
     StreamEvent,
     StreamEventType,
     ToolCall,
+    ToolResult,
     UsageStats,
 )
 
@@ -511,3 +516,379 @@ class TestBaseFallbackStreaming:
         text_events = [e for e in events if e.type == RunEventType.TEXT_DELTA]
         combined = "".join(e.text for e in text_events)
         assert combined == "Hello from fallback"
+
+
+# ------------------------------------------------------------------
+# resume_stream tests
+# ------------------------------------------------------------------
+
+
+@tool(target="client")
+async def read_range(sheet: str) -> str:
+    """Client-side tool — agent pauses when this is called."""
+    return "should never run"
+
+
+class _FakeTrace:
+    def __init__(self, order_index: int) -> None:
+        self.order_index = order_index
+
+
+class _FakeEvent:
+    def __init__(self, sequence_index: int) -> None:
+        self.sequence_index = sequence_index
+        self.event_type = ""
+        self.iteration_index = 0
+        self.correlation_id = None
+        self.data = None
+
+
+class ResumeStateStore:
+    """Minimal fake StateStore for resume_stream tests."""
+
+    def __init__(self) -> None:
+        self._pause_data: dict[str, dict[str, Any]] = {}
+        self._status: dict[str, str] = {}
+        self._events: dict[str, list[dict[str, Any]]] = {}
+        self._traces: list[dict[str, Any]] = []
+        self.finalized: list[dict[str, Any]] = []
+        self.paused: list[dict[str, Any]] = []
+
+    def seed_pause(
+        self, run_id: str, pause_data: dict[str, Any], status: str
+    ) -> None:
+        """Seed a paused run for testing."""
+        self._pause_data[run_id] = pause_data
+        self._status[run_id] = status
+
+    async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
+        return self._pause_data.get(run_id)
+
+    async def claim_paused_run(
+        self, run_id: str, *, expected_status: str
+    ) -> bool:
+        if self._status.get(run_id) != expected_status:
+            return False
+        self._status[run_id] = "running"
+        return True
+
+    async def get_run_events(self, run_id: str) -> list[Any]:
+        return [
+            _FakeEvent(e.get("sequence_index", 0))
+            for e in self._events.get(run_id, [])
+        ]
+
+    async def get_traces(self, run_id: str) -> list[Any]:
+        return [
+            _FakeTrace(t["order_index"])
+            for t in self._traces
+            if t["run_id"] == run_id
+        ]
+
+    async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
+        self._events.setdefault(run_id, []).append(kwargs)
+
+    async def save_trace(
+        self, run_id: str, role: str, content: str,
+        *, order_index: int, meta: Any = None,
+    ) -> None:
+        self._traces.append({
+            "run_id": run_id, "role": role, "content": content,
+            "order_index": order_index, "meta": meta,
+        })
+
+    async def save_tool_call(self, run_id: str, **kwargs: Any) -> None:
+        pass
+
+    async def save_usage(self, run_id: str, **kwargs: Any) -> None:
+        pass
+
+    async def save_llm_interaction(self, run_id: str, **kwargs: Any) -> None:
+        pass
+
+    async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
+        expected = kwargs.pop("expected_current_status", None)
+        if expected and self._status.get(run_id) != expected:
+            return False
+        self.finalized.append({"run_id": run_id, **kwargs})
+        self._status[run_id] = kwargs.get("status", "success")
+        return True
+
+    async def pause_run(
+        self, run_id: str, *, status: str, pause_data: dict[str, Any],
+        iteration_count: int | None = None,
+    ) -> None:
+        self.paused.append({"run_id": run_id, "status": status})
+        self._pause_data[run_id] = pause_data
+        self._status[run_id] = status
+
+
+def _build_pause_data(
+    agent_name: str = "Agent",
+    pending_tc: ToolCall | None = None,
+) -> dict[str, Any]:
+    """Build a serialized PauseState dict for seeding the mock store."""
+    from dendrux.types import AgentStep, Finish
+
+    tc = pending_tc or ToolCall(
+        name="read_range",
+        params={"sheet": "S1"},
+        provider_tool_call_id="ptc_1",
+    )
+    history = [
+        Message(role=Role.SYSTEM, content="You are a test agent."),
+        Message(role=Role.USER, content="Read sheet"),
+        Message(
+            role=Role.ASSISTANT,
+            content="I'll read the sheet.",
+            tool_calls=[tc],
+        ),
+    ]
+    steps = [
+        AgentStep(
+            reasoning="Reading the sheet",
+            action=Finish(answer=""),
+            meta={},
+        ),
+    ]
+    ps = PauseState(
+        history=history,
+        steps=steps,
+        pending_tool_calls=[tc],
+        pending_targets={tc.id: "client"},
+        iteration=1,
+        trace_order_offset=3,
+        usage=UsageStats(input_tokens=50, output_tokens=20, total_tokens=70),
+        agent_name=agent_name,
+    )
+    return ps.to_dict()
+
+
+class TestResumeStream:
+    """Tests for agent.resume_stream() and runner.resume_stream()."""
+
+    async def test_first_event_is_run_resumed(self) -> None:
+        """resume_stream() emits RUN_RESUMED as its first event."""
+        run_id = "test-resume-001"
+        tc = ToolCall(
+            name="read_range",
+            params={"sheet": "S1"},
+            provider_tool_call_id="ptc_1",
+        )
+        store = ResumeStateStore()
+        store.seed_pause(
+            run_id,
+            _build_pause_data(pending_tc=tc),
+            RunStatus.WAITING_CLIENT_TOOL.value,
+        )
+
+        llm = StreamingMockLLM([LLMResponse(text="Done!")])
+        agent = Agent(
+            prompt="You are a test agent.",
+            tools=[add, read_range],
+            provider=llm,
+        )
+
+        from dendrux.runtime.runner import resume_stream
+
+        stream = resume_stream(
+            run_id,
+            agent=agent,
+            provider=llm,
+            state_store=store,
+            tool_results=[
+                ToolResult(
+                    name="read_range",
+                    call_id=tc.id,
+                    payload="Revenue: $100M",
+                    success=True,
+                ),
+            ],
+        )
+
+        events = [e async for e in stream]
+        assert events[0].type == RunEventType.RUN_RESUMED
+        assert events[0].run_id == run_id
+
+    async def test_resume_stream_completes_with_text(self) -> None:
+        """Full round-trip: resume → TEXT_DELTA tokens → RUN_COMPLETED."""
+        run_id = "test-resume-002"
+        tc = ToolCall(
+            name="read_range",
+            params={"sheet": "S1"},
+            provider_tool_call_id="ptc_1",
+        )
+        store = ResumeStateStore()
+        store.seed_pause(
+            run_id,
+            _build_pause_data(pending_tc=tc),
+            RunStatus.WAITING_CLIENT_TOOL.value,
+        )
+
+        llm = StreamingMockLLM([LLMResponse(text="Got it")])
+        agent = Agent(
+            prompt="You are a test agent.",
+            tools=[add, read_range],
+            provider=llm,
+        )
+
+        from dendrux.runtime.runner import resume_stream
+
+        stream = resume_stream(
+            run_id,
+            agent=agent,
+            provider=llm,
+            state_store=store,
+            tool_results=[
+                ToolResult(
+                    name="read_range",
+                    call_id=tc.id,
+                    payload="data",
+                    success=True,
+                ),
+            ],
+        )
+
+        events = [e async for e in stream]
+        types = [e.type for e in events]
+
+        assert types[0] == RunEventType.RUN_RESUMED
+        assert RunEventType.TEXT_DELTA in types
+        assert types[-1] == RunEventType.RUN_COMPLETED
+
+        text = "".join(
+            e.text for e in events if e.type == RunEventType.TEXT_DELTA
+        )
+        assert text == "Got it"
+
+    async def test_resume_stream_error_yields_run_error(self) -> None:
+        """Error during resumed loop → RUN_ERROR event, no exception."""
+        run_id = "test-resume-003"
+        tc = ToolCall(
+            name="read_range",
+            params={"sheet": "S1"},
+            provider_tool_call_id="ptc_1",
+        )
+        store = ResumeStateStore()
+        store.seed_pause(
+            run_id,
+            _build_pause_data(pending_tc=tc),
+            RunStatus.WAITING_CLIENT_TOOL.value,
+        )
+
+        llm = ErrorLLM(RuntimeError("LLM crashed on resume"))
+        agent = Agent(
+            prompt="You are a test agent.",
+            tools=[add, read_range],
+            provider=llm,
+        )
+
+        from dendrux.runtime.runner import resume_stream
+
+        stream = resume_stream(
+            run_id,
+            agent=agent,
+            provider=llm,
+            state_store=store,
+            tool_results=[
+                ToolResult(
+                    name="read_range",
+                    call_id=tc.id,
+                    payload="data",
+                    success=True,
+                ),
+            ],
+        )
+
+        events = [e async for e in stream]
+        types = [e.type for e in events]
+
+        assert RunEventType.RUN_ERROR in types
+        error = next(e for e in events if e.type == RunEventType.RUN_ERROR)
+        assert "LLM crashed on resume" in error.error
+
+    async def test_resume_stream_no_store_yields_error(self) -> None:
+        """resume_stream without persistence → RUN_ERROR (not ValueError)."""
+        llm = StreamingMockLLM([LLMResponse(text="ok")])
+        agent = Agent(
+            prompt="You are a test agent.",
+            tools=[add, read_range],
+            provider=llm,
+        )
+
+        from dendrux.runtime.runner import resume_stream
+
+        stream = resume_stream(
+            "nonexistent",
+            agent=agent,
+            provider=llm,
+            tool_results=[ToolResult(name="x", call_id="x", payload="x")],
+        )
+
+        events = [e async for e in stream]
+        types = [e.type for e in events]
+
+        assert RunEventType.RUN_ERROR in types
+        error = next(e for e in events if e.type == RunEventType.RUN_ERROR)
+        assert "persistence" in error.error.lower()
+
+    async def test_agent_resume_stream_validation(self) -> None:
+        """agent.resume_stream() raises ValueError for bad args synchronously."""
+        llm = StreamingMockLLM([LLMResponse(text="ok")])
+        agent = Agent(
+            prompt="Test.", tools=[add, read_range], provider=llm,
+        )
+
+        # Both args
+        with pytest.raises(ValueError, match="both"):
+            agent.resume_stream(
+                "run1",
+                tool_results=[],
+                user_input="hi",
+            )
+
+        # Neither arg
+        with pytest.raises(ValueError, match="requires either"):
+            agent.resume_stream("run1")
+
+    async def test_agent_resume_stream_returns_run_stream(self) -> None:
+        """agent.resume_stream() returns RunStream with run_id."""
+        run_id = "test-resume-004"
+        tc = ToolCall(
+            name="read_range",
+            params={"sheet": "S1"},
+            provider_tool_call_id="ptc_1",
+        )
+        store = ResumeStateStore()
+        store.seed_pause(
+            run_id,
+            _build_pause_data(pending_tc=tc),
+            RunStatus.WAITING_CLIENT_TOOL.value,
+        )
+
+        llm = StreamingMockLLM([LLMResponse(text="Done")])
+        agent = Agent(
+            prompt="You are a test agent.",
+            tools=[add, read_range],
+            provider=llm,
+            state_store=store,
+        )
+
+        stream = agent.resume_stream(
+            run_id,
+            tool_results=[
+                ToolResult(
+                    name="read_range",
+                    call_id=tc.id,
+                    payload="data",
+                    success=True,
+                ),
+            ],
+        )
+
+        assert isinstance(stream, RunStream)
+        assert stream.run_id == run_id
+
+        events = [e async for e in stream]
+        assert events[0].type == RunEventType.RUN_RESUMED
+        assert events[-1].type == RunEventType.RUN_COMPLETED

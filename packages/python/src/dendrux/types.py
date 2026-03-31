@@ -500,12 +500,13 @@ class StreamEvent:
 
 
 class RunEventType(StrEnum):
-    """Types of events emitted during agent.stream().
+    """Types of events emitted during agent.stream() and agent.resume_stream().
 
     These span the full multi-turn run, not just one LLM call.
 
     Lifecycle events (runner-owned):
-        RUN_STARTED: First event. Carries run_id for correlation.
+        RUN_STARTED: First event for new runs. Carries run_id for correlation.
+        RUN_RESUMED: First event for resumed runs. Carries run_id.
         RUN_COMPLETED: Terminal. Run finished (success or max_iterations).
         RUN_PAUSED: Terminal. Run paused for client tool or human input.
         RUN_ERROR: Terminal. Run failed. No exception is raised to the consumer.
@@ -521,6 +522,7 @@ class RunEventType(StrEnum):
 
     # Lifecycle (runner-owned)
     RUN_STARTED = "run_started"
+    RUN_RESUMED = "run_resumed"
     RUN_COMPLETED = "run_completed"
     RUN_PAUSED = "run_paused"
     RUN_ERROR = "run_error"
@@ -542,10 +544,11 @@ _TERMINAL_RUN_EVENTS = frozenset(
 
 @dataclass(frozen=True)
 class RunEvent:
-    """A single event from agent.stream().
+    """A single event from agent.stream() or agent.resume_stream().
 
     Carries data relevant to its type:
-        RUN_STARTED:   run_id
+        RUN_STARTED:   run_id (first event for new runs)
+        RUN_RESUMED:   run_id (first event for resumed runs)
         TEXT_DELTA:     text
         TOOL_USE_START: tool_name, tool_call_id
         TOOL_USE_END:   tool_call, tool_name, tool_call_id

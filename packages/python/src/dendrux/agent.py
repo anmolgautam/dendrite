@@ -440,6 +440,63 @@ class Agent:
             **kwargs,
         )
 
+    def resume_stream(
+        self,
+        run_id: str,
+        *,
+        tool_results: list[ToolResult] | None = None,
+        user_input: str | None = None,
+        observer: Any | None = None,
+    ) -> RunStream:
+        """Stream a resumed run as RunEvents.
+
+        Same parameters as resume(). Returns a RunStream immediately —
+        no ``await`` needed. Async setup (store resolution, pause state
+        load, claim, history build) runs lazily on first iteration.
+
+        First event is RUN_RESUMED (not RUN_STARTED), carrying the
+        existing run_id for correlation.
+
+        Usage:
+            async with agent.resume_stream(run_id, tool_results=results) as stream:
+                async for event in stream:
+                    if event.type == RunEventType.TEXT_DELTA:
+                        print(event.text, end="")
+
+        Args:
+            run_id: The paused run's ID.
+            tool_results: Results for pending tool calls (client tool runs).
+            user_input: Clarification answer (human-in-the-loop runs).
+            observer: Optional additional loop observer.
+
+        Returns:
+            RunStream — async iterable of RunEvent objects.
+
+        Raises:
+            ValueError: If provider not set, both args provided, or neither.
+        """
+        if self._provider is None:
+            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        if tool_results is not None and user_input is not None:
+            raise ValueError("Cannot provide both tool_results and user_input to resume_stream().")
+        if tool_results is None and user_input is None:
+            raise ValueError(
+                "resume_stream() requires either tool_results or user_input."
+            )
+
+        from dendrux.runtime.runner import resume_stream as runner_resume_stream
+
+        return runner_resume_stream(
+            run_id,
+            agent=self,
+            provider=self._provider,
+            state_store_resolver=self._resolve_state_store,
+            tool_results=tool_results,
+            user_input=user_input,
+            redact=self._redact,
+            extra_observer=observer,
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

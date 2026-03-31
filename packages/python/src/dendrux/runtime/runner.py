@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from dendrux.loops.base import Loop
     from dendrux.runtime.state import StateStore
     from dendrux.strategies.base import Strategy
-    from dendrux.types import RunEvent, RunResult, RunStream, ToolResult
+    from dendrux.types import Message, RunEvent, RunResult, RunStream, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -623,6 +623,150 @@ async def resume_with_input(
     )
 
 
+class _ResumeContext:
+    """Prepared state for re-entering the loop after a resume.
+
+    Built by _prepare_resume(), consumed by both _resume_core() (batch)
+    and resume_stream() (streaming). Does NOT own claiming — that happens
+    before prepare is called.
+    """
+
+    __slots__ = (
+        "history", "observer", "sequencer", "pause_state",
+        "resolved_loop", "resolved_strategy",
+    )
+
+    def __init__(
+        self,
+        *,
+        history: list[Message],
+        observer: Any,
+        sequencer: EventSequencer,
+        pause_state: PauseState,
+        resolved_loop: Loop,
+        resolved_strategy: Strategy,
+    ) -> None:
+        self.history = history
+        self.observer = observer
+        self.sequencer = sequencer
+        self.pause_state = pause_state
+        self.resolved_loop = resolved_loop
+        self.resolved_strategy = resolved_strategy
+
+
+async def _prepare_resume(
+    run_id: str,
+    pause_state: PauseState,
+    *,
+    state_store: StateStore,
+    agent: Agent,
+    provider: LLMProvider,
+    strategy: Strategy | None = None,
+    loop: Loop | None = None,
+    redact: Callable[[str], str] | None = None,
+    expected_status: str,
+    tool_results: list[ToolResult] | None = None,
+    user_input: str | None = None,
+    extra_observer: Any | None = None,
+) -> _ResumeContext:
+    """Build everything needed to re-enter the loop after a resume.
+
+    Receives an already-loaded PauseState — does NOT load pause data or
+    claim the run. Those steps are owned by the caller (_resume_core for
+    direct resume, resume_stream for streaming, resume_claimed for bridge).
+
+    Steps performed:
+      1. Initialize sequencer from DB (continues across pause boundaries)
+      2. Record durable run.resumed event
+      3. Build resume history (inject tool results or user input)
+      4. Create observer with correct trace offset
+      5. Notify observer of injected messages
+    """
+    from dendrux.runtime.observer import PersistenceObserver
+    from dendrux.tool import get_tool_def
+    from dendrux.types import Message, Role
+
+    resolved_strategy = strategy or NativeToolCalling()
+    resolved_loop = loop or ReActLoop()
+
+    # 1. Initialize sequencer from DB max (continues across pause boundaries)
+    existing_events = await state_store.get_run_events(run_id)
+    max_seq = max((e.sequence_index for e in existing_events), default=-1)
+    sequencer = EventSequencer(initial=max_seq + 1)
+
+    # 2. Record resume event with enriched payload for dashboard
+    resume_data: dict[str, Any] = {"resumed_from": expected_status}
+    if tool_results is not None:
+        resume_data["submitted_results"] = [
+            {"call_id": tr.call_id, "name": tr.name, "success": tr.success} for tr in tool_results
+        ]
+    elif user_input is not None:
+        resume_data["user_input"] = redact(user_input) if redact else user_input
+    await _emit_event(state_store, run_id, "run.resumed", sequencer, resume_data)
+
+    # 3. Build resume history
+    history = list(pause_state.history)
+
+    if tool_results is not None:
+        for tr in tool_results:
+            result_msg = Message(
+                role=Role.TOOL,
+                content=tr.payload,
+                name=tr.name,
+                call_id=tr.call_id,
+                meta={"is_error": True} if not tr.success else {},
+            )
+            history.append(result_msg)
+    elif user_input is not None:
+        history.append(Message(role=Role.USER, content=user_input))
+
+    # 4. Create observer with correct trace offset
+    traces = await state_store.get_traces(run_id)
+    trace_order_offset = max((t.order_index for t in traces), default=-1) + 1
+
+    target_lookup = {}
+    for fn in agent.tools:
+        td = get_tool_def(fn)
+        target_lookup[td.name] = td.target
+    persistence_obs = PersistenceObserver(
+        state_store,
+        run_id,
+        model=provider.model,
+        provider_name=type(provider).__name__,
+        target_lookup=target_lookup,
+        redact=redact,
+        initial_order_index=trace_order_offset,
+        event_sequencer=sequencer,
+    )
+
+    observer: Any
+    if extra_observer is not None:
+        from dendrux.observers.composite import CompositeObserver
+
+        observer = CompositeObserver([persistence_obs, extra_observer])
+    else:
+        observer = persistence_obs
+
+    # 5. Notify observer of injected messages and tool completions
+    if tool_results is not None:
+        pending_by_id = {tc.id: tc for tc in pause_state.pending_tool_calls}
+        injected_start = len(pause_state.history)
+        for i, tr in enumerate(tool_results):
+            await observer.on_message_appended(history[injected_start + i], pause_state.iteration)
+            await observer.on_tool_completed(pending_by_id[tr.call_id], tr, pause_state.iteration)
+    elif user_input is not None:
+        await observer.on_message_appended(history[-1], pause_state.iteration)
+
+    return _ResumeContext(
+        history=history,
+        observer=observer,
+        sequencer=sequencer,
+        pause_state=pause_state,
+        resolved_loop=resolved_loop,
+        resolved_strategy=resolved_strategy,
+    )
+
+
 async def _resume_core(
     run_id: str,
     *,
@@ -646,13 +790,6 @@ async def _resume_core(
         _skip_claim: Internal flag — skip the atomic claim step when the caller
             has already claimed via submit_and_claim(). Used by resume_claimed().
     """
-    from dendrux.runtime.observer import PersistenceObserver
-    from dendrux.tool import get_tool_def
-    from dendrux.types import Message, Role
-
-    resolved_strategy = strategy or NativeToolCalling()
-    resolved_loop = loop or ReActLoop()
-
     # 1. Load pause state
     raw_pause = await state_store.get_pause_state(run_id)
     if raw_pause is None:
@@ -678,8 +815,6 @@ async def _resume_core(
             )
 
     # 3. Atomic claim — transition WAITING → RUNNING
-    #    Done after validation so a bad request doesn't leave the run stuck.
-    #    Skipped when caller already claimed via submit_and_claim().
     if not _skip_claim:
         claimed = await state_store.claim_paused_run(run_id, expected_status=expected_status)
         if not claimed:
@@ -688,96 +823,38 @@ async def _resume_core(
                 f"cannot resume. It may have been claimed by another caller."
             )
 
-    # 4. Initialize sequencer from DB max (continues across pause boundaries)
-    existing_events = await state_store.get_run_events(run_id)
-    max_seq = max((e.sequence_index for e in existing_events), default=-1)
-    sequencer = EventSequencer(initial=max_seq + 1)
-
-    # 5. Record resume event with enriched payload for dashboard
-    resume_data: dict[str, Any] = {"resumed_from": expected_status}
-    if tool_results is not None:
-        resume_data["submitted_results"] = [
-            {"call_id": tr.call_id, "name": tr.name, "success": tr.success} for tr in tool_results
-        ]
-    elif user_input is not None:
-        resume_data["user_input"] = redact(user_input) if redact else user_input
-    await _emit_event(state_store, run_id, "run.resumed", sequencer, resume_data)
-
-    # 6. Build resume history
-    history = list(pause_state.history)
-
-    if tool_results is not None:
-        # Inject tool results into history as TOOL messages
-        for tr in tool_results:
-            result_msg = Message(
-                role=Role.TOOL,
-                content=tr.payload,
-                name=tr.name,
-                call_id=tr.call_id,
-                meta={"is_error": True} if not tr.success else {},
-            )
-            history.append(result_msg)
-    elif user_input is not None:
-        # Append clarification response as USER message
-        history.append(Message(role=Role.USER, content=user_input))
-
-    # 7. Load real trace order offset from DB (not the approximate one in pause_state)
-    traces = await state_store.get_traces(run_id)
-    trace_order_offset = max((t.order_index for t in traces), default=-1) + 1
-
-    # 8. Create observer for resumed run with shared sequencer
-    target_lookup = {}
-    for fn in agent.tools:
-        td = get_tool_def(fn)
-        target_lookup[td.name] = td.target
-    persistence_obs = PersistenceObserver(
-        state_store,
+    # 4-8. Prepare history, observer, sequencer (shared with resume_stream)
+    ctx = await _prepare_resume(
         run_id,
-        model=provider.model,
-        provider_name=type(provider).__name__,
-        target_lookup=target_lookup,
+        pause_state,
+        state_store=state_store,
+        agent=agent,
+        provider=provider,
+        strategy=strategy,
+        loop=loop,
         redact=redact,
-        initial_order_index=trace_order_offset,
-        event_sequencer=sequencer,
+        expected_status=expected_status,
+        tool_results=tool_results,
+        user_input=user_input,
+        extra_observer=extra_observer,
     )
 
-    # Compose with extra observer (e.g. TransportObserver for SSE)
-    observer: Any
-    if extra_observer is not None:
-        from dendrux.observers.composite import CompositeObserver
-
-        observer = CompositeObserver([persistence_obs, extra_observer])
-    else:
-        observer = persistence_obs
-
-    # 7. Notify observer of injected messages and tool completions
-    if tool_results is not None:
-        pending_by_id = {tc.id: tc for tc in pause_state.pending_tool_calls}
-        injected_start = len(pause_state.history)
-        for i, tr in enumerate(tool_results):
-            # Persist the TOOL message trace
-            await observer.on_message_appended(history[injected_start + i], pause_state.iteration)
-            # Persist the tool_call record (params, result, success, target)
-            await observer.on_tool_completed(pending_by_id[tr.call_id], tr, pause_state.iteration)
-    elif user_input is not None:
-        await observer.on_message_appended(history[-1], pause_state.iteration)
-
-    # 8. Re-enter loop
+    # 9. Re-enter loop (batch)
     try:
-        result = await resolved_loop.run(
+        result = await ctx.resolved_loop.run(
             agent=agent,
             provider=provider,
-            strategy=resolved_strategy,
-            user_input="",  # Not used when initial_history is provided
+            strategy=ctx.resolved_strategy,
+            user_input="",
             run_id=run_id,
-            observer=observer,
-            initial_history=history,
-            initial_steps=pause_state.steps,
-            iteration_offset=pause_state.iteration,
-            initial_usage=pause_state.usage,
+            observer=ctx.observer,
+            initial_history=ctx.history,
+            initial_steps=ctx.pause_state.steps,
+            iteration_offset=ctx.pause_state.iteration,
+            initial_usage=ctx.pause_state.usage,
         )
 
-        # 9. Finalize or pause again
+        # 10. Finalize or pause again
         if result.status in (RunStatus.WAITING_CLIENT_TOOL, RunStatus.WAITING_HUMAN_INPUT):
             new_pause: PauseState = result.meta["pause_state"]
             await state_store.pause_run(
@@ -790,7 +867,7 @@ async def _resume_core(
                 state_store,
                 run_id,
                 "run.paused",
-                sequencer,
+                ctx.sequencer,
                 {
                     "status": result.status.value,
                     "pending_tool_calls": [
@@ -813,11 +890,11 @@ async def _resume_core(
                 total_usage=result.usage,
                 expected_current_status="running",
             )
-            # Surface CAS result so callers (server) know if they own the terminal event
             result.meta["_finalize_won"] = finalize_won
             if finalize_won:
                 await _emit_event(
-                    state_store, run_id, "run.completed", sequencer, {"status": result.status.value}
+                    state_store, run_id, "run.completed", ctx.sequencer,
+                    {"status": result.status.value},
                 )
 
         return result
@@ -835,12 +912,232 @@ async def _resume_core(
             )
         except Exception:
             logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)
-        # Only the CAS winner emits the error event
         if error_won:
             await _emit_event(
-                state_store, run_id, "run.error", sequencer, {"error": str(exc)[:500]}
+                state_store, run_id, "run.error", ctx.sequencer, {"error": str(exc)[:500]}
             )
         raise
+
+
+def resume_stream(
+    run_id: str,
+    *,
+    agent: Agent,
+    provider: LLMProvider,
+    state_store: StateStore | None = None,
+    state_store_resolver: Callable[[], Any] | None = None,
+    tool_results: list[ToolResult] | None = None,
+    user_input: str | None = None,
+    redact: Callable[[str], str] | None = None,
+    extra_observer: Any | None = None,
+) -> RunStream:
+    """Stream a resumed run as RunEvents, returning a RunStream.
+
+    Synchronous — returns immediately. All async setup (store resolution,
+    pause state load, claim, history build) runs lazily on first iteration.
+
+    Same error contract as run_stream(): exceptions are caught, persisted,
+    and yielded as RUN_ERROR events. No exception is raised to the consumer.
+
+    First event is RUN_RESUMED (not RUN_STARTED) carrying the existing run_id.
+    """
+    from dendrux.types import RunEvent, RunResult
+    from dendrux.types import RunStream as _RunStream
+
+    _shared: dict[str, Any] = {"state_store": state_store, "sequencer": None}
+
+    async def _generate() -> AsyncGenerator[RunEvent, None]:
+        store = state_store
+
+        try:
+            # 1. Resolve state store
+            if store is None and state_store_resolver is not None:
+                store = await state_store_resolver()
+            _shared["state_store"] = store
+
+            if store is None:
+                raise ValueError(
+                    "resume_stream() requires persistence. "
+                    "Pass database_url or state_store to the agent."
+                )
+
+            # 2. Load pause state
+            raw_pause = await store.get_pause_state(run_id)
+            if raw_pause is None:
+                raise ValueError(f"Run '{run_id}' has no pause state — cannot resume.")
+            pause_state = PauseState.from_dict(raw_pause)
+
+            # 2b. Verify agent identity
+            if pause_state.agent_name and pause_state.agent_name != agent.name:
+                raise ValueError(
+                    f"Agent name mismatch: run '{run_id}' was paused by "
+                    f"'{pause_state.agent_name}', but resume called with "
+                    f"'{agent.name}'."
+                )
+
+            # 3. Validate tool results
+            if tool_results is not None:
+                pending_ids = {tc.id for tc in pause_state.pending_tool_calls}
+                provided_ids = {tr.call_id for tr in tool_results}
+                if provided_ids != pending_ids:
+                    raise ValueError(
+                        f"Tool result call_ids {provided_ids} do not match "
+                        f"pending tool call_ids {pending_ids}."
+                    )
+
+            # 4. Determine expected status and claim
+            if tool_results is not None:
+                expected = RunStatus.WAITING_CLIENT_TOOL.value
+            else:
+                expected = RunStatus.WAITING_HUMAN_INPUT.value
+
+            claimed = await store.claim_paused_run(run_id, expected_status=expected)
+            if not claimed:
+                raise ValueError(
+                    f"Run '{run_id}' is not in status '{expected}' — "
+                    f"cannot resume. It may have been claimed by another caller."
+                )
+
+            # 5. Prepare (shared helper — history, observer, sequencer)
+            ctx = await _prepare_resume(
+                run_id,
+                pause_state,
+                state_store=store,
+                agent=agent,
+                provider=provider,
+                redact=redact,
+                expected_status=expected,
+                tool_results=tool_results,
+                user_input=user_input,
+                extra_observer=extra_observer,
+            )
+            _shared["sequencer"] = ctx.sequencer
+
+            # 6. Emit RUN_RESUMED as first event
+            yield RunEvent(type=RunEventType.RUN_RESUMED, run_id=run_id)
+
+            # 7. Stream the loop
+            async for event in ctx.resolved_loop.run_stream(
+                agent=agent,
+                provider=provider,
+                strategy=ctx.resolved_strategy,
+                user_input="",
+                run_id=run_id,
+                observer=ctx.observer,
+                initial_history=ctx.history,
+                initial_steps=ctx.pause_state.steps,
+                iteration_offset=ctx.pause_state.iteration,
+                initial_usage=ctx.pause_state.usage,
+            ):
+                # Persist loop outcomes before forwarding
+                if event.type == RunEventType.RUN_COMPLETED and event.run_result:
+                    result = event.run_result
+                    redacted_answer = (
+                        redact(result.answer) if redact and result.answer else result.answer
+                    )
+                    finalize_won = await store.finalize_run(
+                        run_id,
+                        status=result.status.value,
+                        answer=redacted_answer,
+                        iteration_count=result.iteration_count,
+                        total_usage=result.usage,
+                        expected_current_status="running",
+                    )
+                    if finalize_won:
+                        await _emit_event(
+                            store, run_id, "run.completed", ctx.sequencer,
+                            {"status": result.status.value},
+                        )
+                    yield event
+
+                elif event.type == RunEventType.RUN_PAUSED and event.run_result:
+                    result = event.run_result
+                    pause_state_obj: PauseState = result.meta["pause_state"]
+                    await store.pause_run(
+                        run_id,
+                        status=result.status.value,
+                        pause_data=pause_state_obj.to_dict(),
+                        iteration_count=result.iteration_count,
+                    )
+                    await _emit_event(
+                        store,
+                        run_id,
+                        "run.paused",
+                        ctx.sequencer,
+                        {
+                            "status": result.status.value,
+                            "pending_tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "target": pause_state_obj.pending_targets.get(tc.id),
+                                }
+                                for tc in pause_state_obj.pending_tool_calls
+                            ],
+                        },
+                    )
+                    yield event
+
+                else:
+                    yield event
+
+        except Exception as exc:
+            store = _shared.get("state_store")
+            sequencer = _shared.get("sequencer")
+            if store is not None:
+                error_won = False
+                try:
+                    redacted_err = redact(str(exc)) if redact else str(exc)
+                    error_won = await store.finalize_run(
+                        run_id,
+                        status=RunStatus.ERROR.value,
+                        error=redacted_err,
+                        total_usage=None,
+                        expected_current_status="running",
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist ERROR status for run %s", run_id, exc_info=True
+                    )
+                if error_won:
+                    await _emit_event(
+                        store, run_id, "run.error", sequencer,
+                        {"error": str(exc)[:500]},
+                    )
+
+            yield RunEvent(
+                type=RunEventType.RUN_ERROR,
+                run_result=RunResult(
+                    run_id=run_id,
+                    status=RunStatus.ERROR,
+                    error=str(exc),
+                ),
+                error=str(exc),
+            )
+
+    async def _cleanup() -> None:
+        """CAS-guarded cancellation for abandoned resume streams."""
+        store = _shared.get("state_store")
+        sequencer = _shared.get("sequencer")
+        if store is not None:
+            try:
+                cancel_won = await store.finalize_run(
+                    run_id,
+                    status=RunStatus.CANCELLED.value,
+                    expected_current_status="running",
+                )
+                if cancel_won and sequencer:
+                    await _emit_event(
+                        store, run_id, "run.cancelled", sequencer, {}
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to cancel run %s during resume stream cleanup",
+                    run_id,
+                    exc_info=True,
+                )
+
+    return _RunStream(run_id=run_id, generator=_generate(), cleanup=_cleanup)
 
 
 async def resume_claimed(
