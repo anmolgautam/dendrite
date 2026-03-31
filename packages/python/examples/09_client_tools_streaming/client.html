@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dendrux — Client Tool Streaming</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 2rem; max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.5rem; color: #fff; }
+  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  #input-section { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+  #user-input { flex: 1; padding: 0.6rem; border: 1px solid #333; border-radius: 6px; background: #1a1a1a; color: #e0e0e0; font-size: 0.9rem; }
+  #user-input:focus { outline: none; border-color: #2563eb; }
+  button { padding: 0.6rem 1.2rem; border: none; border-radius: 6px; background: #2563eb; color: white; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #333; cursor: not-allowed; }
+
+  /* Streaming text output */
+  #output { min-height: 2rem; padding: 0.75rem; margin-bottom: 1rem; border-radius: 6px; background: #1a1a1a; border: 1px solid #222; font-size: 0.9rem; line-height: 1.5; white-space: pre-wrap; display: none; }
+
+  /* Event log */
+  #events { margin-bottom: 1rem; }
+  .event { padding: 0.4rem 0.6rem; margin-bottom: 0.2rem; border-radius: 4px; font-size: 0.78rem; font-family: monospace; }
+  .ev-lifecycle { background: #1a2332; color: #60a5fa; }
+  .ev-tool { background: #1a2e1a; color: #86efac; }
+  .ev-pause { background: #2e2a1a; color: #fbbf24; }
+  .ev-done { background: #1a2e1a; color: #4ade80; }
+  .ev-error { background: #2e1a1a; color: #f87171; }
+
+  /* Tool form */
+  #tool-form { display: none; padding: 1rem; border: 1px solid #fbbf24; border-radius: 8px; background: #1a1a0f; margin-bottom: 1rem; }
+  #tool-form h3 { font-size: 0.95rem; color: #fbbf24; margin-bottom: 0.5rem; }
+  #tool-form .params { font-family: monospace; font-size: 0.8rem; color: #aaa; margin-bottom: 0.75rem; word-break: break-all; }
+  #tool-result-input { width: 100%; padding: 0.5rem; border: 1px solid #333; border-radius: 4px; background: #1a1a1a; color: #e0e0e0; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  #tool-result-input:focus { outline: none; border-color: #fbbf24; }
+
+  #status { font-size: 0.8rem; color: #666; margin-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Dendrux Client Tool Streaming</h1>
+<p class="subtitle">fetch() + NDJSON &mdash; agent streams text, pauses for client tools, resumes.</p>
+
+<div id="input-section">
+  <input id="user-input" type="text"
+         placeholder="e.g. Look up AAPL price, then read cell A1 from my spreadsheet"
+         onkeydown="if(event.key==='Enter') startRun()" />
+  <button id="start-btn" onclick="startRun()">Start</button>
+</div>
+
+<div id="output"></div>
+<div id="events"></div>
+
+<div id="tool-form">
+  <h3>Tool needed: <span id="tool-name"></span></h3>
+  <div class="params">Params: <span id="tool-params"></span></div>
+  <input id="tool-result-input" type="text"
+         placeholder="Paste the tool result here..."
+         onkeydown="if(event.key==='Enter') submitToolResult()" />
+  <button onclick="submitToolResult()">Submit Result</button>
+</div>
+
+<div id="status"></div>
+
+<script>
+  let currentRunId = null;
+  let pendingToolCalls = [];
+
+  // -- UI helpers --------------------------------------------------------
+
+  function log(text, cls) {
+    const el = document.createElement("div");
+    el.className = "event " + cls;
+    el.textContent = text;
+    document.getElementById("events").appendChild(el);
+    el.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function setStatus(text) {
+    document.getElementById("status").textContent = text;
+  }
+
+  function appendText(text) {
+    const out = document.getElementById("output");
+    out.style.display = "block";
+    out.textContent += text;
+  }
+
+  function resetUI() {
+    document.getElementById("output").textContent = "";
+    document.getElementById("output").style.display = "none";
+    document.getElementById("events").innerHTML = "";
+    document.getElementById("tool-form").style.display = "none";
+    document.getElementById("tool-result-input").value = "";
+    pendingToolCalls = [];
+  }
+
+  // -- NDJSON stream consumer --------------------------------------------
+
+  async function consumeStream(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep incomplete trailing line
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          handleEvent(JSON.parse(line));
+        } catch (e) {
+          console.warn("NDJSON parse error:", line, e);
+        }
+      }
+    }
+
+    // Flush any remaining data
+    if (buffer.trim()) {
+      try {
+        handleEvent(JSON.parse(buffer));
+      } catch (_) { /* trailing partial — ignore */ }
+    }
+  }
+
+  // -- Event handler (same for start + resume) ---------------------------
+
+  function handleEvent(event) {
+    switch (event.type) {
+      case "run_started":
+        currentRunId = event.run_id;
+        log("Run started: " + event.run_id, "ev-lifecycle");
+        break;
+
+      case "run_resumed":
+        log("Run resumed: " + event.run_id, "ev-lifecycle");
+        break;
+
+      case "text_delta":
+        appendText(event.text);
+        break;
+
+      case "tool_use_start":
+        log("Calling tool: " + event.tool_name, "ev-tool");
+        break;
+
+      case "tool_use_end":
+        log("Tool args ready: " + event.tool_name, "ev-tool");
+        break;
+
+      case "tool_result":
+        log(
+          "Tool done: " + event.tool_result.name +
+          " (" + (event.tool_result.success ? "ok" : "error") + ")",
+          "ev-tool"
+        );
+        break;
+
+      case "run_paused":
+        handlePause(event.run_result);
+        break;
+
+      case "run_completed":
+        handleCompleted(event.run_result);
+        break;
+
+      case "run_error":
+        log("ERROR: " + (event.error || (event.run_result && event.run_result.error) || "unknown"), "ev-error");
+        setStatus("Error");
+        document.getElementById("start-btn").disabled = false;
+        break;
+    }
+  }
+
+  // -- Pause / resume flow -----------------------------------------------
+
+  function handlePause(runResult) {
+    const toolCalls = runResult.pending_tool_calls || [];
+    pendingToolCalls = toolCalls;
+
+    if (toolCalls.length > 0) {
+      // UI handles the first pending tool call only
+      const tc = toolCalls[0];
+      document.getElementById("tool-name").textContent = tc.name;
+      document.getElementById("tool-params").textContent = JSON.stringify(tc.params);
+      document.getElementById("tool-form").style.display = "block";
+      log("PAUSED: agent needs " + tc.name + "(" + JSON.stringify(tc.params) + ")", "ev-pause");
+    } else {
+      log("PAUSED: " + runResult.status, "ev-pause");
+    }
+    setStatus("Paused — waiting for client tool");
+  }
+
+  function handleCompleted(runResult) {
+    if (runResult.answer) {
+      log("COMPLETED: " + runResult.answer, "ev-done");
+    } else {
+      log("COMPLETED", "ev-done");
+    }
+    setStatus("Done");
+    document.getElementById("start-btn").disabled = false;
+  }
+
+  // -- User actions -------------------------------------------------------
+
+  async function startRun() {
+    const input = document.getElementById("user-input").value.trim();
+    if (!input) return;
+
+    resetUI();
+    document.getElementById("start-btn").disabled = true;
+    setStatus("Starting...");
+
+    const resp = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: input }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: "Unknown error" }));
+      log("Failed to start: " + (err.error || resp.status), "ev-error");
+      document.getElementById("start-btn").disabled = false;
+      return;
+    }
+
+    await consumeStream(resp);
+  }
+
+  async function submitToolResult() {
+    if (!currentRunId || pendingToolCalls.length === 0) return;
+
+    const resultText = document.getElementById("tool-result-input").value.trim();
+    if (!resultText) return;
+
+    document.getElementById("tool-form").style.display = "none";
+    document.getElementById("tool-result-input").value = "";
+    setStatus("Submitting tool result, resuming...");
+
+    // Resume requires results for ALL pending tool calls.
+    // The UI only prompts for one value — apply it to every call.
+    const results = pendingToolCalls.map((tc) => ({
+      call_id: tc.id,
+      name: tc.name,
+      result: JSON.stringify(resultText),
+    }));
+
+    const resp = await fetch("/resume/" + currentRunId, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_results: results }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: "Unknown error" }));
+      log("Failed to resume: " + (err.error || resp.status), "ev-error");
+      document.getElementById("start-btn").disabled = false;
+      return;
+    }
+
+    log("Tool result submitted, resuming...", "ev-tool");
+    pendingToolCalls = [];
+    await consumeStream(resp);
+  }
+</script>
+
+</body>
+</html>
