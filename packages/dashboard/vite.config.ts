@@ -12,7 +12,7 @@ export default defineConfig({
   },
   base: "./",
   build: {
-    outDir: "../python/src/dendrite/dashboard/static",
+    outDir: "../python/src/dendrux/dashboard/static",
     emptyOutDir: true,
   },
   server: {

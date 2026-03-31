@@ -1,14 +1,14 @@
 .PHONY: test lint typecheck format ci clean
 
 test:
-	pytest tests/ -v --cov=src/dendrite --cov-report=term-missing --cov-fail-under=80
+	pytest tests/ -v --cov=src/dendrux --cov-report=term-missing --cov-fail-under=80
 
 lint:
 	ruff check .
 	ruff format --check .
 
 typecheck:
-	mypy src/dendrite/
+	mypy src/dendrux/
 
 format:
 	ruff format .
