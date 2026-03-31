@@ -1,4 +1,4 @@
-"""Tests for OpenAI Responses API provider — conversion logic only, no API calls."""
+"""Tests for OpenAI Responses API provider — conversion logic and streaming."""
 
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ import pytest
 openai = pytest.importorskip("openai", reason="openai extra not installed")
 
 from dendrux.llm.openai_responses import OpenAIResponsesProvider  # noqa: E402
-from dendrux.types import Message, Role, ToolCall, ToolDef  # noqa: E402
+from dendrux.types import (  # noqa: E402
+    Message,
+    Role,
+    StreamEventType,
+    ToolCall,
+    ToolDef,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +66,9 @@ def provider() -> OpenAIResponsesProvider:
 @pytest.fixture
 def provider_with_search() -> OpenAIResponsesProvider:
     return OpenAIResponsesProvider(
-        model="gpt-4o", api_key="test-key", builtin_tools=["web_search_preview"],
+        model="gpt-4o",
+        api_key="test-key",
+        builtin_tools=["web_search_preview"],
     )
 
 
@@ -193,7 +201,9 @@ class TestBuildTools:
 
     def test_mixed_tools(self, provider_with_search: OpenAIResponsesProvider) -> None:
         tools = [
-            ToolDef(name="custom", description="Custom", parameters={"type": "object", "properties": {}}),
+            ToolDef(
+                name="custom", description="Custom", parameters={"type": "object", "properties": {}}
+            ),
         ]
         result = provider_with_search._build_tools(tools)
         assert len(result) == 2
@@ -269,9 +279,12 @@ class TestComplete:
         )
         provider._client.responses.create = AsyncMock(return_value=fake)
 
-        tools = [ToolDef(name="add", description="Add", parameters={"type": "object", "properties": {}})]
+        tools = [
+            ToolDef(name="add", description="Add", parameters={"type": "object", "properties": {}})
+        ]
         result = await provider.complete(
-            [Message(role=Role.USER, content="add")], tools=tools,
+            [Message(role=Role.USER, content="add")],
+            tools=tools,
         )
         assert result.tool_calls is not None
         assert result.tool_calls[0].name == "add"
@@ -283,7 +296,9 @@ class TestComplete:
         with pytest.raises(TimeoutError, match="timed out.*timeout=300"):
             await provider.complete([Message(role=Role.USER, content="Hi")])
 
-    async def test_builtin_tools_included(self, provider_with_search: OpenAIResponsesProvider) -> None:
+    async def test_builtin_tools_included(
+        self, provider_with_search: OpenAIResponsesProvider
+    ) -> None:
         fake = FakeResponse(output=[], output_text="ok")
         mock_create = AsyncMock(return_value=fake)
         provider_with_search._client.responses.create = mock_create
@@ -306,7 +321,9 @@ class TestComplete:
 
     async def test_reasoning_effort_forwarded(self) -> None:
         p = OpenAIResponsesProvider(
-            model="gpt-5", api_key="test", reasoning_effort="high",
+            model="gpt-5",
+            api_key="test",
+            reasoning_effort="high",
         )
         fake = FakeResponse(output=[], output_text="ok")
         mock_create = AsyncMock(return_value=fake)
@@ -317,7 +334,9 @@ class TestComplete:
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "high"}
 
-    async def test_instructions_from_system_message(self, provider: OpenAIResponsesProvider) -> None:
+    async def test_instructions_from_system_message(
+        self, provider: OpenAIResponsesProvider
+    ) -> None:
         fake = FakeResponse(output=[], output_text="ok")
         mock_create = AsyncMock(return_value=fake)
         provider._client.responses.create = mock_create
@@ -337,7 +356,8 @@ class TestComplete:
         provider._client.responses.create = mock_create
 
         await provider.complete(
-            [Message(role=Role.USER, content="Hi")], unknown_param="ignored",
+            [Message(role=Role.USER, content="Hi")],
+            unknown_param="ignored",
         )
         call_kwargs = mock_create.call_args[1]
         assert "unknown_param" not in call_kwargs
@@ -345,14 +365,17 @@ class TestComplete:
     async def test_reasoning_effort_per_call_override(self) -> None:
         """Per-call reasoning_effort overrides constructor default."""
         p = OpenAIResponsesProvider(
-            model="gpt-5", api_key="test", reasoning_effort="high",
+            model="gpt-5",
+            api_key="test",
+            reasoning_effort="high",
         )
         fake = FakeResponse(output=[], output_text="ok")
         mock_create = AsyncMock(return_value=fake)
         p._client.responses.create = mock_create
 
         await p.complete(
-            [Message(role=Role.USER, content="quick")], reasoning_effort="low",
+            [Message(role=Role.USER, content="quick")],
+            reasoning_effort="low",
         )
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "low"}
@@ -400,5 +423,386 @@ class TestEdgeCases:
         """code_interpreter requires config — not supported via builtin_tools."""
         with pytest.raises(ValueError, match="Unknown built-in tool"):
             OpenAIResponsesProvider(
-                model="gpt-4o", api_key="test", builtin_tools=["code_interpreter"],
+                model="gpt-4o",
+                api_key="test",
+                builtin_tools=["code_interpreter"],
             )
+
+
+# ---------------------------------------------------------------------------
+# Streaming fakes — simulate Responses API SSE events
+# ---------------------------------------------------------------------------
+@dataclass
+class FakeResponseItem:
+    type: str = "message"
+    id: str = "item_1"
+    name: str | None = None
+    call_id: str | None = None
+
+
+@dataclass
+class FakeCompletedResponse:
+    """Simulates the response object inside a response.completed event."""
+
+    usage: FakeUsage = field(default_factory=FakeUsage)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"fake": True}
+
+
+@dataclass
+class FakeStreamEvent:
+    """Generic fake for Responses API stream events."""
+
+    type: str
+    delta: str | None = None
+    item: Any = None
+    item_id: str | None = None
+    arguments: str | None = None
+    response: Any = None
+    error: Any = None
+
+
+class MockAsyncStream:
+    """Async iterable that yields pre-built events."""
+
+    def __init__(self, items: list[Any]) -> None:
+        self._items = list(items)
+        self._idx = 0
+
+    def __aiter__(self) -> MockAsyncStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._idx >= len(self._items):
+            raise StopAsyncIteration
+        item = self._items[self._idx]
+        self._idx += 1
+        return item
+
+
+def _text_stream_events(text: str) -> list[FakeStreamEvent]:
+    """Build Responses API stream events for a text-only response."""
+    events: list[FakeStreamEvent] = []
+    # Text deltas character by character
+    for char in text:
+        events.append(FakeStreamEvent(type="response.output_text.delta", delta=char))
+    # Response completed
+    events.append(
+        FakeStreamEvent(
+            type="response.completed",
+            response=FakeCompletedResponse(
+                usage=FakeUsage(
+                    input_tokens=10,
+                    output_tokens=len(text),
+                    total_tokens=10 + len(text),
+                )
+            ),
+        )
+    )
+    return events
+
+
+def _tool_call_stream_events(
+    tools: list[tuple[str, str, str, str]],
+) -> list[FakeStreamEvent]:
+    """Build Responses API stream events for tool calls.
+
+    Each tool is (name, item_id, call_id, arguments_json).
+    """
+    events: list[FakeStreamEvent] = []
+    for name, item_id, call_id, args_json in tools:
+        # output_item.added — function call starts
+        events.append(
+            FakeStreamEvent(
+                type="response.output_item.added",
+                item=FakeResponseItem(
+                    type="function_call",
+                    id=item_id,
+                    name=name,
+                    call_id=call_id,
+                ),
+            )
+        )
+        # function_call_arguments.done — complete arguments
+        events.append(
+            FakeStreamEvent(
+                type="response.function_call_arguments.done",
+                item_id=item_id,
+                arguments=args_json,
+            )
+        )
+    # Response completed
+    events.append(
+        FakeStreamEvent(
+            type="response.completed",
+            response=FakeCompletedResponse(
+                usage=FakeUsage(input_tokens=50, output_tokens=30, total_tokens=80)
+            ),
+        )
+    )
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Streaming tests
+# ---------------------------------------------------------------------------
+class TestCompleteStream:
+    """Tests for complete_stream() — real streaming via mocked Responses API events."""
+
+    async def test_text_only_stream(self, provider: OpenAIResponsesProvider) -> None:
+        """Text deltas are yielded as TEXT_DELTA events, followed by DONE."""
+        stream_events = _text_stream_events("Hello")
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
+            events.append(event)
+
+        text_events = [e for e in events if e.type == StreamEventType.TEXT_DELTA]
+        assert len(text_events) == 5
+        assert "".join(e.text for e in text_events) == "Hello"
+
+        done_events = [e for e in events if e.type == StreamEventType.DONE]
+        assert len(done_events) == 1
+        assert done_events[0].raw.text == "Hello"
+
+    async def test_single_tool_call_stream(self, provider: OpenAIResponsesProvider) -> None:
+        """Single tool call: TOOL_USE_START → TOOL_USE_END → DONE."""
+        stream_events = _tool_call_stream_events(
+            [
+                ("add", "item_1", "call_1", '{"a": 1, "b": 2}'),
+            ]
+        )
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="add")],
+            tools=[ToolDef(name="add", description="Add", parameters={"type": "object"})],
+        ):
+            events.append(event)
+
+        types = [e.type for e in events]
+        assert StreamEventType.TOOL_USE_START in types
+        assert StreamEventType.TOOL_USE_END in types
+        assert StreamEventType.DONE in types
+
+        start = next(e for e in events if e.type == StreamEventType.TOOL_USE_START)
+        assert start.tool_name == "add"
+        assert start.tool_call_id == "call_1"
+
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call is not None
+        assert end.tool_call.name == "add"
+        assert end.tool_call.params == {"a": 1, "b": 2}
+        assert end.tool_call.provider_tool_call_id == "call_1"
+
+    async def test_parallel_tool_calls_stream(self, provider: OpenAIResponsesProvider) -> None:
+        """Multiple tool calls produce correct START/END pairs."""
+        stream_events = _tool_call_stream_events(
+            [
+                ("add", "item_1", "call_1", '{"a": 1}'),
+                ("mul", "item_2", "call_2", '{"x": 2}'),
+            ]
+        )
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="calc")],
+        ):
+            events.append(event)
+
+        starts = [e for e in events if e.type == StreamEventType.TOOL_USE_START]
+        ends = [e for e in events if e.type == StreamEventType.TOOL_USE_END]
+        assert len(starts) == 2
+        assert len(ends) == 2
+        assert starts[0].tool_name == "add"
+        assert starts[1].tool_name == "mul"
+        assert ends[0].tool_call.name == "add"
+        assert ends[1].tool_call.name == "mul"
+
+    async def test_usage_from_completed_event(self, provider: OpenAIResponsesProvider) -> None:
+        """Usage stats are extracted from response.completed event."""
+        stream_events = _text_stream_events("Hi")
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")],
+        ):
+            events.append(event)
+
+        done = next(e for e in events if e.type == StreamEventType.DONE)
+        assert done.raw.usage.input_tokens == 10
+        assert done.raw.usage.output_tokens == 2
+        assert done.raw.usage.total_tokens == 12
+
+    async def test_done_carries_complete_llm_response(
+        self, provider: OpenAIResponsesProvider
+    ) -> None:
+        """DONE event carries text + tool_calls + usage in LLMResponse."""
+        stream_events = [
+            FakeStreamEvent(type="response.output_text.delta", delta="Let me check"),
+            FakeStreamEvent(
+                type="response.output_item.added",
+                item=FakeResponseItem(
+                    type="function_call", id="item_1", name="search", call_id="call_1"
+                ),
+            ),
+            FakeStreamEvent(
+                type="response.function_call_arguments.done",
+                item_id="item_1",
+                arguments='{"q": "test"}',
+            ),
+            FakeStreamEvent(
+                type="response.completed",
+                response=FakeCompletedResponse(
+                    usage=FakeUsage(input_tokens=20, output_tokens=15, total_tokens=35)
+                ),
+            ),
+        ]
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="search")],
+        ):
+            events.append(event)
+
+        done = next(e for e in events if e.type == StreamEventType.DONE)
+        assert done.raw.text == "Let me check"
+        assert done.raw.tool_calls is not None
+        assert done.raw.tool_calls[0].name == "search"
+        assert done.raw.tool_calls[0].params == {"q": "test"}
+        assert done.raw.usage.total_tokens == 35
+
+    async def test_stream_passes_stream_flag(self, provider: OpenAIResponsesProvider) -> None:
+        """complete_stream() passes stream=True to the API."""
+        stream_events = _text_stream_events("ok")
+        mock_create = AsyncMock(return_value=MockAsyncStream(stream_events))
+        provider._client.responses.create = mock_create
+
+        async for _ in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")],
+        ):
+            pass
+
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["stream"] is True
+
+    async def test_stream_bad_request_raises_not_implemented(
+        self,
+        provider: OpenAIResponsesProvider,
+    ) -> None:
+        """BadRequestError → NotImplementedError with clear message."""
+        import httpx
+
+        mock_response = httpx.Response(400, request=httpx.Request("POST", "http://test"))
+        provider._client.responses.create = AsyncMock(
+            side_effect=openai.BadRequestError(
+                message="streaming not supported",
+                response=mock_response,
+                body=None,
+            ),
+        )
+
+        with pytest.raises(NotImplementedError, match="Streaming request rejected"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")],
+            ):
+                pass  # pragma: no cover
+
+    async def test_stream_timeout_raises(self, provider: OpenAIResponsesProvider) -> None:
+        """APITimeoutError → TimeoutError with hint."""
+        provider._client.responses.create = AsyncMock(
+            side_effect=openai.APITimeoutError(request=None),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(TimeoutError, match="timed out"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")],
+            ):
+                pass  # pragma: no cover
+
+    async def test_stream_failed_event_raises(self, provider: OpenAIResponsesProvider) -> None:
+        """response.failed event raises RuntimeError."""
+        stream_events = [
+            FakeStreamEvent(type="response.failed", error="something went wrong"),
+        ]
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        with pytest.raises(RuntimeError, match="stream failed"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")],
+            ):
+                pass  # pragma: no cover
+
+    async def test_stream_forwards_kwargs(self, provider: OpenAIResponsesProvider) -> None:
+        """Supported kwargs are forwarded alongside stream flag."""
+        stream_events = _text_stream_events("ok")
+        mock_create = AsyncMock(return_value=MockAsyncStream(stream_events))
+        provider._client.responses.create = mock_create
+
+        async for _ in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")],
+            temperature=0.5,
+        ):
+            pass
+
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["temperature"] == 0.5
+
+    async def test_stream_malformed_tool_args_default_empty(
+        self,
+        provider: OpenAIResponsesProvider,
+    ) -> None:
+        """Malformed JSON in tool arguments defaults to empty dict."""
+        stream_events = [
+            FakeStreamEvent(
+                type="response.output_item.added",
+                item=FakeResponseItem(
+                    type="function_call", id="item_1", name="broken", call_id="call_1"
+                ),
+            ),
+            FakeStreamEvent(
+                type="response.function_call_arguments.done",
+                item_id="item_1",
+                arguments="{bad json",
+            ),
+            FakeStreamEvent(
+                type="response.completed",
+                response=FakeCompletedResponse(),
+            ),
+        ]
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="go")],
+        ):
+            events.append(event)
+
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call.params == {}
+
+    async def test_stream_provider_response_populated(
+        self, provider: OpenAIResponsesProvider
+    ) -> None:
+        """Streaming DONE event carries provider_response from completed event."""
+        stream_events = _text_stream_events("Hi")
+        provider._client.responses.create = AsyncMock(
+            return_value=MockAsyncStream(stream_events)
+        )
+
+        events = []
+        async for event in provider.complete_stream(
+            [Message(role=Role.USER, content="Hi")],
+        ):
+            events.append(event)
+
+        done = next(e for e in events if e.type == StreamEventType.DONE)
+        assert done.raw.provider_request is not None
+        assert done.raw.provider_response is not None
+        assert done.raw.provider_response == {"fake": True}

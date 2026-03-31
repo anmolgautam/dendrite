@@ -44,12 +44,13 @@ class AnthropicProvider(LLMProvider):
     """Anthropic Messages API provider.
 
     Converts Dendrux's universal Message/ToolDef types to Anthropic's native
-    format and normalizes responses back. Sprint 1: batch only (complete()),
-    streaming uses the base class fallback.
+    format and normalizes responses back. Supports both batch (complete())
+    and streaming (complete_stream()) with token-by-token text deltas and
+    tool call events.
 
     Capabilities reflect what this adapter *implements*, not what the
-    Anthropic API can theoretically do. Streaming, thinking, and multimodal
-    will be enabled when their corresponding code paths are added.
+    Anthropic API can theoretically do. Thinking and multimodal will be
+    enabled when their corresponding code paths are added.
 
     Usage:
         provider = AnthropicProvider(api_key="sk-...", model="claude-sonnet-4-6")

@@ -23,11 +23,15 @@ from dendrux.types import (
     LLMResponse,
     ProviderCapabilities,
     Role,
+    StreamEvent,
+    StreamEventType,
     ToolCall,
     UsageStats,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from dendrux.types import Message, ToolDef
 
 # Responses-API kwargs that complete() will forward.
@@ -83,8 +87,8 @@ class OpenAIResponsesProvider(LLMProvider):
     capabilities = ProviderCapabilities(
         supports_native_tools=True,
         supports_tool_call_ids=True,
-        supports_streaming=False,
-        supports_streaming_tool_deltas=False,
+        supports_streaming=True,
+        supports_streaming_tool_deltas=True,
         supports_thinking=False,
         supports_multimodal=False,
         supports_system_prompt=True,
@@ -156,22 +160,23 @@ class OpenAIResponsesProvider(LLMProvider):
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    async def complete(
+    def _build_api_kwargs(
         self,
         messages: list[Message],
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> LLMResponse:
-        """Send messages to the model via the Responses API.
+        tools: list[ToolDef] | None,
+        kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build Responses API kwargs from Dendrux messages and caller kwargs.
 
-        kwargs override constructor defaults (e.g. model, max_output_tokens).
-        Only supported kwargs are forwarded; unknown keys are ignored.
+        Returns (api_kwargs, captured_request) where captured_request is the
+        serializable subset for the evidence layer.
         """
         instructions, input_items = self._convert_messages(messages)
         api_tools = self._build_tools(tools)
 
         max_output_tokens = kwargs.pop(
-            "max_output_tokens", kwargs.pop("max_tokens", self._max_output_tokens),
+            "max_output_tokens",
+            kwargs.pop("max_tokens", self._max_output_tokens),
         )
 
         api_kwargs: dict[str, Any] = {
@@ -204,14 +209,30 @@ class OpenAIResponsesProvider(LLMProvider):
 
         # Forward remaining supported kwargs
         already_handled = {
-            "model", "max_output_tokens", "max_tokens", "temperature",
+            "model",
+            "max_output_tokens",
+            "max_tokens",
+            "temperature",
         }
         for key in _SUPPORTED_KWARGS - already_handled:
             if key in kwargs:
                 api_kwargs[key] = kwargs.pop(key)
 
-        # Capture provider request payload
         captured_request = dict(api_kwargs)
+        return api_kwargs, captured_request
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send messages to the model via the Responses API.
+
+        kwargs override constructor defaults (e.g. model, max_output_tokens).
+        Only supported kwargs are forwarded; unknown keys are ignored.
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
 
         try:
             response = await self._client.responses.create(**api_kwargs)
@@ -229,6 +250,140 @@ class OpenAIResponsesProvider(LLMProvider):
         llm_response.provider_response = response.model_dump()
 
         return llm_response
+
+    async def complete_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Stream LLM response as events via the Responses API.
+
+        The Responses API has explicit event types for each phase of output
+        (content deltas, function call starts/args/done), making the mapping
+        to StreamEvent straightforward.
+
+        At stream end, yields a DONE event carrying the full LLMResponse.
+
+        Raises NotImplementedError if the endpoint rejects streaming.
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
+        api_kwargs["stream"] = True
+
+        try:
+            stream = await self._client.responses.create(**api_kwargs)
+        except openai.BadRequestError as exc:
+            raise NotImplementedError(
+                f"Streaming request rejected by the Responses API endpoint. "
+                f"Use agent.run() for batch completion. "
+                f"Original error: {exc.message}"
+            ) from exc
+        except openai.APITimeoutError:
+            raise TimeoutError(
+                f"LLM request timed out after {self._timeout}s. "
+                f"The model may need more time for large outputs. "
+                f"Increase timeout: OpenAIResponsesProvider(model=..., timeout=300)"
+            ) from None
+
+        # Accumulators for building the final LLMResponse
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        usage = UsageStats()
+
+        # Track active function calls: item_id → (name, call_id)
+        _active_calls: dict[str, tuple[str, str]] = {}
+        _completed_response: Any = None
+
+        async for event in stream:
+            event_type = getattr(event, "type", None)
+
+            # --- Text deltas ---
+            if event_type == "response.output_text.delta":
+                delta_text = event.delta
+                if delta_text:
+                    text_parts.append(delta_text)
+                    yield StreamEvent(
+                        type=StreamEventType.TEXT_DELTA, text=delta_text
+                    )
+
+            # --- Function call lifecycle (ordered: added → delta → done) ---
+            elif event_type == "response.output_item.added":
+                item = event.item
+                if getattr(item, "type", None) == "function_call":
+                    item_id = item.id
+                    name = item.name
+                    call_id = getattr(item, "call_id", item_id)
+                    _active_calls[item_id] = (name, call_id)
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_USE_START,
+                        tool_name=name,
+                        tool_call_id=call_id,
+                    )
+
+            elif event_type == "response.function_call_arguments.delta":
+                # Incremental arg fragments — done event gives the complete
+                # string, so no accumulation needed here.
+                pass
+
+            elif event_type == "response.function_call_arguments.done":
+                item_id = event.item_id
+                raw_args = event.arguments
+                try:
+                    params = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    params = {}
+
+                name, call_id = _active_calls.pop(
+                    item_id, ("unknown", item_id)
+                )
+                tc = ToolCall(
+                    name=name,
+                    params=params if isinstance(params, dict) else {},
+                    provider_tool_call_id=call_id,
+                )
+                tool_calls.append(tc)
+                yield StreamEvent(
+                    type=StreamEventType.TOOL_USE_END,
+                    tool_call=tc,
+                    tool_name=tc.name,
+                    tool_call_id=call_id,
+                )
+
+            # --- Response completed — extract usage ---
+            elif event_type == "response.completed":
+                _completed_response = event.response
+                if hasattr(_completed_response, "usage") and _completed_response.usage:
+                    usage = UsageStats(
+                        input_tokens=getattr(
+                            _completed_response.usage, "input_tokens", 0
+                        ),
+                        output_tokens=getattr(
+                            _completed_response.usage, "output_tokens", 0
+                        ),
+                        total_tokens=getattr(
+                            _completed_response.usage, "total_tokens", 0
+                        ),
+                    )
+
+            # --- Response failed ---
+            elif event_type == "response.failed":
+                error_msg = getattr(event, "error", "Unknown streaming error")
+                raise RuntimeError(f"Responses API stream failed: {error_msg}")
+
+        # Assemble the final LLMResponse
+        llm_response = LLMResponse(
+            text="".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls if tool_calls else None,
+            raw=None,
+            usage=usage,
+        )
+        llm_response.provider_request = captured_request
+        if _completed_response is not None and hasattr(
+            _completed_response, "model_dump"
+        ):
+            llm_response.provider_response = _completed_response.model_dump()
+
+        yield StreamEvent(type=StreamEventType.DONE, raw=llm_response)
 
     # ------------------------------------------------------------------
     # Outbound conversions: Dendrux → OpenAI Responses API

@@ -24,11 +24,15 @@ from dendrux.types import (
     LLMResponse,
     ProviderCapabilities,
     Role,
+    StreamEvent,
+    StreamEventType,
     ToolCall,
     UsageStats,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from dendrux.types import Message, ToolDef
 
 # OpenAI-specific kwargs that complete() will forward to the API.
@@ -47,6 +51,22 @@ _SUPPORTED_KWARGS = frozenset(
         "reasoning_effort",
     }
 )
+
+
+class _ToolCallBuffer:
+    """Accumulator for one streaming tool call, keyed by chunk index.
+
+    Handles any arrival order of name, id, and argument fragments —
+    some OpenAI-compatible backends don't guarantee name-first delivery.
+    """
+
+    __slots__ = ("name", "tool_call_id", "json_parts", "start_emitted")
+
+    def __init__(self) -> None:
+        self.name: str | None = None
+        self.tool_call_id: str | None = None
+        self.json_parts: list[str] = []
+        self.start_emitted: bool = False
 
 
 class OpenAIProvider(LLMProvider):
@@ -76,8 +96,8 @@ class OpenAIProvider(LLMProvider):
     capabilities = ProviderCapabilities(
         supports_native_tools=True,
         supports_tool_call_ids=True,
-        supports_streaming=False,
-        supports_streaming_tool_deltas=False,
+        supports_streaming=True,
+        supports_streaming_tool_deltas=True,
         supports_thinking=False,
         supports_multimodal=False,
         supports_system_prompt=True,
@@ -142,23 +162,24 @@ class OpenAIProvider(LLMProvider):
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    async def complete(
+    def _build_api_kwargs(
         self,
         messages: list[Message],
-        tools: list[ToolDef] | None = None,
-        **kwargs: Any,
-    ) -> LLMResponse:
-        """Send messages to the model and return a normalized response.
+        tools: list[ToolDef] | None,
+        kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build OpenAI API kwargs from Dendrux messages and caller kwargs.
 
-        kwargs override constructor defaults (e.g. model, max_tokens, temperature).
-        Only supported kwargs are forwarded; unknown keys are ignored.
+        Returns (api_kwargs, captured_request) where captured_request is the
+        serializable subset for the evidence layer.
         """
         api_messages = self._convert_messages(messages)
         api_tools = self._convert_tools(tools) if tools else openai.NOT_GIVEN
 
         # Resolve max_tokens: per-call kwargs override constructor default
         max_tokens = kwargs.pop(
-            "max_completion_tokens", kwargs.pop("max_tokens", self._max_tokens),
+            "max_completion_tokens",
+            kwargs.pop("max_tokens", self._max_tokens),
         )
 
         api_kwargs: dict[str, Any] = {
@@ -179,13 +200,32 @@ class OpenAIProvider(LLMProvider):
                 api_kwargs[key] = attr
 
         # Forward remaining supported kwargs — ignore the rest
-        already_handled = {"model", "max_tokens", "max_completion_tokens", "temperature", "reasoning_effort"}
+        already_handled = {
+            "model",
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "reasoning_effort",
+        }
         for key in _SUPPORTED_KWARGS - already_handled:
             if key in kwargs:
                 api_kwargs[key] = kwargs.pop(key)
 
-        # Capture provider request payload
         captured_request = {k: v for k, v in api_kwargs.items() if v is not openai.NOT_GIVEN}
+        return api_kwargs, captured_request
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send messages to the model and return a normalized response.
+
+        kwargs override constructor defaults (e.g. model, max_tokens, temperature).
+        Only supported kwargs are forwarded; unknown keys are ignored.
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
 
         try:
             response = await self._client.chat.completions.create(**api_kwargs)
@@ -203,6 +243,162 @@ class OpenAIProvider(LLMProvider):
         llm_response.provider_response = response.model_dump()
 
         return llm_response
+
+    async def complete_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDef] | None = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Stream LLM response as events, token by token.
+
+        Text deltas are yielded immediately as they arrive.
+        Tool call arguments are buffered by index and flushed as complete
+        TOOL_USE_END events when the terminal finish_reason arrives.
+
+        At stream end, yields a DONE event carrying the full LLMResponse.
+
+        Raises NotImplementedError if the endpoint rejects streaming (common
+        with some OpenAI-compatible backends).
+        """
+        api_kwargs, captured_request = self._build_api_kwargs(messages, tools, kwargs)
+        api_kwargs["stream"] = True
+        api_kwargs["stream_options"] = {"include_usage": True}
+
+        try:
+            stream = await self._client.chat.completions.create(**api_kwargs)
+        except openai.BadRequestError as exc:
+            raise NotImplementedError(
+                f"Streaming request rejected by endpoint at {self._client.base_url}. "
+                f"If this endpoint does not support streaming, use agent.run() instead. "
+                f"Original error: {exc.message}"
+            ) from exc
+        except openai.APITimeoutError:
+            raise TimeoutError(
+                f"LLM request timed out after {self._timeout}s. "
+                f"The model may need more time for large outputs. "
+                f"Increase timeout: OpenAIProvider(model=..., timeout=300)"
+            ) from None
+
+        # Accumulators for building the final LLMResponse
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        usage = UsageStats()
+        finish_reason: str | None = None
+
+        # Tool call buffers keyed by chunk index — no ordering assumptions.
+        # Name, id, and arguments may arrive in any order for a given index
+        # (some OpenAI-compatible backends don't guarantee name-first).
+        _tool_buffers: dict[int, _ToolCallBuffer] = {}
+
+        async for chunk in stream:
+            # Usage arrives in the final chunk
+            if chunk.usage:
+                usage = UsageStats(
+                    input_tokens=chunk.usage.prompt_tokens or 0,
+                    output_tokens=chunk.usage.completion_tokens or 0,
+                    total_tokens=chunk.usage.total_tokens or 0,
+                )
+
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # --- Text deltas ---
+            if delta.content:
+                text_parts.append(delta.content)
+                yield StreamEvent(type=StreamEventType.TEXT_DELTA, text=delta.content)
+
+            # --- Tool call deltas ---
+            if delta.tool_calls:
+                for delta_tc in delta.tool_calls:
+                    idx = delta_tc.index
+
+                    # Ensure buffer exists for this index
+                    if idx not in _tool_buffers:
+                        _tool_buffers[idx] = _ToolCallBuffer()
+
+                    buf = _tool_buffers[idx]
+
+                    # Capture id (first occurrence)
+                    if delta_tc.id and buf.tool_call_id is None:
+                        buf.tool_call_id = delta_tc.id
+
+                    if delta_tc.function:
+                        # Capture name (first occurrence)
+                        if delta_tc.function.name and buf.name is None:
+                            buf.name = delta_tc.function.name
+
+                        # Accumulate argument fragments
+                        if delta_tc.function.arguments:
+                            buf.json_parts.append(delta_tc.function.arguments)
+
+                    # Emit TOOL_USE_START once we know the name (deferred
+                    # if args arrived before name for this index).
+                    if buf.name and not buf.start_emitted:
+                        buf.start_emitted = True
+                        yield StreamEvent(
+                            type=StreamEventType.TOOL_USE_START,
+                            tool_name=buf.name,
+                            tool_call_id=buf.tool_call_id,
+                        )
+
+            # --- Flush all buffered tool calls on terminal finish_reason ---
+            if choice.finish_reason is not None:
+                finish_reason = choice.finish_reason
+                if _tool_buffers:
+                    for flush_idx in sorted(_tool_buffers):
+                        buf = _tool_buffers[flush_idx]
+                        raw_json = "".join(buf.json_parts)
+                        try:
+                            params = json.loads(raw_json) if raw_json else {}
+                        except json.JSONDecodeError:
+                            params = {}
+
+                        # Ensure START was emitted even if name arrived late
+                        if buf.name and not buf.start_emitted:
+                            buf.start_emitted = True
+                            yield StreamEvent(
+                                type=StreamEventType.TOOL_USE_START,
+                                tool_name=buf.name,
+                                tool_call_id=buf.tool_call_id,
+                            )
+
+                        tc = ToolCall(
+                            name=buf.name or "unknown",
+                            params=params if isinstance(params, dict) else {},
+                            provider_tool_call_id=buf.tool_call_id,
+                        )
+                        tool_calls.append(tc)
+                        yield StreamEvent(
+                            type=StreamEventType.TOOL_USE_END,
+                            tool_call=tc,
+                            tool_name=tc.name,
+                            tool_call_id=buf.tool_call_id,
+                        )
+                    _tool_buffers.clear()
+
+        # Assemble the final LLMResponse
+        llm_response = LLMResponse(
+            text="".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls if tool_calls else None,
+            raw=None,
+            usage=usage,
+        )
+        llm_response.provider_request = captured_request
+        llm_response.provider_response = {
+            "object": "chat.completion.chunked",
+            "finish_reason": finish_reason,
+            "usage": {
+                "prompt_tokens": usage.input_tokens,
+                "completion_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            },
+        }
+
+        yield StreamEvent(type=StreamEventType.DONE, raw=llm_response)
 
     # ------------------------------------------------------------------
     # Outbound conversions: Dendrux → OpenAI
