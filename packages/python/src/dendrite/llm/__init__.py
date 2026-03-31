@@ -14,4 +14,8 @@ def __getattr__(name: str) -> type:  # noqa: N807
         from dendrite.llm.anthropic import AnthropicProvider
 
         return AnthropicProvider
+    if name == "OpenAIProvider":
+        from dendrite.llm.openai import OpenAIProvider
+
+        return OpenAIProvider
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

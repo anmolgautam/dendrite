@@ -68,17 +68,29 @@ class AnthropicProvider(LLMProvider):
         *,
         model: str,
         api_key: str | None = None,
+        max_tokens: int = 16_000,
+        temperature: float | None = None,
         timeout: float = 120.0,
         max_retries: int = 3,
     ) -> None:
-        # When api_key is None, the Anthropic SDK reads ANTHROPIC_API_KEY
-        # from the environment automatically.
+        """Create an Anthropic provider.
+
+        Args:
+            model: Model identifier (e.g. "claude-sonnet-4-6").
+            api_key: API key. Defaults to ANTHROPIC_API_KEY env var.
+            max_tokens: Maximum output tokens per call. Override per-call via kwargs.
+            temperature: Sampling temperature. None = model default. Override per-call.
+            timeout: HTTP request timeout in seconds.
+            max_retries: Number of automatic retries on transient errors.
+        """
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key,
             timeout=httpx.Timeout(timeout, connect=10.0),
             max_retries=max_retries,
         )
         self._model = model
+        self._max_tokens = max_tokens
+        self._temperature = temperature
         self._timeout = timeout
 
     @property
@@ -115,14 +127,20 @@ class AnthropicProvider(LLMProvider):
 
         api_kwargs: dict[str, Any] = {
             "model": kwargs.pop("model", self._model),
-            "max_tokens": kwargs.pop("max_tokens", 16_000),
+            "max_tokens": kwargs.pop("max_tokens", self._max_tokens),
             "messages": api_messages,
             "system": system_prompt if system_prompt else anthropic.NOT_GIVEN,
             "tools": api_tools,
         }
 
-        # Forward only supported kwargs — ignore the rest
-        for key in _SUPPORTED_KWARGS - {"model", "max_tokens"}:
+        # Apply constructor defaults for optional params (per-call kwargs override)
+        if "temperature" in kwargs:
+            api_kwargs["temperature"] = kwargs.pop("temperature")
+        elif self._temperature is not None:
+            api_kwargs["temperature"] = self._temperature
+
+        # Forward remaining supported kwargs — ignore the rest
+        for key in _SUPPORTED_KWARGS - {"model", "max_tokens", "temperature"}:
             if key in kwargs:
                 api_kwargs[key] = kwargs.pop(key)
 
