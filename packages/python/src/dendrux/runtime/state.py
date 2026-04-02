@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from dendrux.db.models import AgentRun
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -446,6 +449,13 @@ class SQLAlchemyStateStore:
         try:
             result_dict = json.loads(result_payload)
         except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "Tool call result JSON decode failed — run=%s tool=%s "
+                "payload_len=%d",
+                run_id,
+                tool_name,
+                len(result_payload) if result_payload else 0,
+            )
             result_dict = {"raw": result_payload}
 
         async with self._session_factory() as session:

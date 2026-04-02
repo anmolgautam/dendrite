@@ -347,3 +347,65 @@ class TestRedaction:
         await obs.on_tool_completed(tc, result, iteration=1)
 
         assert store.tool_calls[0]["params"]["creds"]["password"] == "***123"
+
+
+# ------------------------------------------------------------------
+# Phase 1 hardening — cycle guard in _redact_value
+# ------------------------------------------------------------------
+
+
+class TestRedactCycleGuard:
+    def test_circular_dict_replaced_with_placeholder(self) -> None:
+        """Self-referencing dict is replaced with a JSON-safe placeholder."""
+        from dendrux.runtime.observer import _redact_value
+
+        d: dict[str, Any] = {"key": "secret"}
+        d["self"] = d  # circular reference
+
+        result = _redact_value(d, lambda s: s.upper())
+        assert result["key"] == "SECRET"
+        assert result["self"] == "[circular]"
+
+    def test_circular_list_replaced_with_placeholder(self) -> None:
+        """Self-referencing list is replaced with a JSON-safe placeholder."""
+        from dendrux.runtime.observer import _redact_value
+
+        lst: list[Any] = ["secret"]
+        lst.append(lst)  # circular reference
+
+        result = _redact_value(lst, lambda s: s.upper())
+        assert result[0] == "SECRET"
+        assert result[1] == "[circular]"
+
+    def test_circular_result_is_json_serializable(self) -> None:
+        """After redaction, circular structures can be safely JSON-serialized."""
+        import json as _json
+
+        from dendrux.runtime.observer import _redact_value
+
+        d: dict[str, Any] = {"key": "secret"}
+        d["self"] = d
+
+        result = _redact_value(d, lambda s: s.upper())
+        # Must not raise — the cycle is gone
+        serialized = _json.dumps(result)
+        assert "[circular]" in serialized
+
+    def test_shared_subdict_redacted_on_every_path(self) -> None:
+        """A shared (non-cyclic) sub-dict is redacted each time it appears."""
+        from dendrux.runtime.observer import _redact_value
+
+        shared = {"password": "secret"}
+        d = {"a": shared, "b": shared}
+
+        result = _redact_value(d, lambda s: s.upper())
+        assert result["a"]["password"] == "SECRET"
+        assert result["b"]["password"] == "SECRET"
+
+    def test_deep_nesting_still_redacts(self) -> None:
+        """Normal deep nesting should still work fine."""
+        from dendrux.runtime.observer import _redact_value
+
+        d = {"a": {"b": {"c": {"d": "secret"}}}}
+        result = _redact_value(d, lambda s: s.upper())
+        assert result["a"]["b"]["c"]["d"] == "SECRET"

@@ -806,3 +806,101 @@ class TestCompleteStream:
         assert done.raw.provider_request is not None
         assert done.raw.provider_response is not None
         assert done.raw.provider_response == {"fake": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 hardening tests
+# ---------------------------------------------------------------------------
+class TestBoundaryHardening:
+    """Crash-proofing and degradation logging tests."""
+
+    async def test_stream_malformed_json_logs_warning(
+        self, provider: OpenAIResponsesProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed tool call JSON in stream logs a warning with context."""
+        stream_events = [
+            FakeStreamEvent(
+                type="response.output_item.added",
+                item=FakeResponseItem(
+                    type="function_call", id="item_1", name="broken", call_id="call_1"
+                ),
+            ),
+            FakeStreamEvent(
+                type="response.function_call_arguments.done",
+                item_id="item_1",
+                arguments="{bad json",
+            ),
+            FakeStreamEvent(
+                type="response.completed",
+                response=FakeCompletedResponse(),
+            ),
+        ]
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dendrux.llm.openai_responses"):
+            events = []
+            async for event in provider.complete_stream(
+                [Message(role=Role.USER, content="go")],
+            ):
+                events.append(event)
+
+        assert any("Malformed tool call JSON" in r.message for r in caplog.records)
+        assert any("provider=openai_responses" in r.message for r in caplog.records)
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call.params == {}
+
+    async def test_stream_unknown_tool_name_logs_warning(
+        self, provider: OpenAIResponsesProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Tool call with no matching start event logs a warning."""
+        stream_events = [
+            # No output_item.added event — just the done event
+            FakeStreamEvent(
+                type="response.function_call_arguments.done",
+                item_id="orphan_item",
+                arguments='{"a": 1}',
+            ),
+            FakeStreamEvent(
+                type="response.completed",
+                response=FakeCompletedResponse(),
+            ),
+        ]
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dendrux.llm.openai_responses"):
+            events = []
+            async for event in provider.complete_stream(
+                [Message(role=Role.USER, content="go")],
+            ):
+                events.append(event)
+
+        assert any("no matching start event" in r.message for r in caplog.records)
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call.name == "unknown"
+
+    async def test_complete_connection_error_mapped(
+        self, provider: OpenAIResponsesProvider
+    ) -> None:
+        """APIConnectionError → ConnectionError with model context."""
+        provider._client.responses.create = AsyncMock(
+            side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to OpenAI Responses API failed"):
+            await provider.complete([Message(role=Role.USER, content="Hi")])
+
+    async def test_stream_connection_error_mapped(
+        self, provider: OpenAIResponsesProvider
+    ) -> None:
+        """Streaming APIConnectionError → ConnectionError with model context."""
+        provider._client.responses.create = AsyncMock(
+            side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to OpenAI Responses API failed"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")],
+            ):
+                pass  # pragma: no cover

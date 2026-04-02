@@ -917,3 +917,88 @@ class TestCompleteStream:
         tool_end = [e for e in collected if e.type == StreamEventType.TOOL_USE_END][0]
         assert tool_end.tool_call.params == {}
         assert tool_end.tool_call.name == "broken"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 hardening tests
+# ---------------------------------------------------------------------------
+class TestBoundaryHardening:
+    """Crash-proofing and degradation logging tests."""
+
+    @pytest.fixture
+    def provider(self) -> AnthropicProvider:
+        return AnthropicProvider(api_key="sk-test", model="claude-sonnet-4-6")
+
+    async def test_stream_malformed_json_logs_warning(
+        self, provider: AnthropicProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed tool call JSON in stream logs a warning with context."""
+        import logging
+
+        final_msg = AnthropicMessage(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            content=[],
+            model="claude-sonnet-4-6",
+            stop_reason="end_turn",
+            usage=Usage(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+        events = [
+            _FakeStreamEvent(
+                type="content_block_start",
+                content_block=_FakeContentBlock(type="tool_use", name="broken", id="t1"),
+            ),
+            _FakeStreamEvent(
+                type="content_block_delta",
+                delta=_FakeDelta(type="input_json_delta", partial_json="{bad"),
+            ),
+            _FakeStreamEvent(type="content_block_stop"),
+        ]
+        fake_stream = _FakeStream(events, final_msg)
+        provider._client.messages.stream = MagicMock(return_value=fake_stream)
+
+        with caplog.at_level(logging.WARNING, logger="dendrux.llm.anthropic"):
+            collected = []
+            async for event in provider.complete_stream(
+                [Message(role=Role.USER, content="go")]
+            ):
+                collected.append(event)
+
+        assert any("Malformed tool call JSON" in r.message for r in caplog.records)
+        assert any("provider=anthropic" in r.message for r in caplog.records)
+        tool_end = [e for e in collected if e.type == StreamEventType.TOOL_USE_END][0]
+        assert tool_end.tool_call.params == {}
+
+    async def test_complete_connection_error_mapped(
+        self, provider: AnthropicProvider
+    ) -> None:
+        """APIConnectionError → ConnectionError with model context."""
+        import anthropic
+
+        provider._client.messages.create = AsyncMock(
+            side_effect=anthropic.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to Anthropic API failed"):
+            await provider.complete([Message(role=Role.USER, content="Hi")])
+
+    async def test_stream_connection_error_mapped(
+        self, provider: AnthropicProvider
+    ) -> None:
+        """Streaming APIConnectionError → ConnectionError with model context."""
+        import anthropic
+
+        provider._client.messages.stream = MagicMock(
+            side_effect=anthropic.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to Anthropic API"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")]
+            ):
+                pass  # pragma: no cover

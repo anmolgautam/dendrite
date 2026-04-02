@@ -902,7 +902,7 @@ class TestMaxDelegationDepth:
         assert ctx is not None
         assert ctx.max_delegation_depth == 5
         # Warning was emitted
-        assert any("unbounded" in msg and "clamped to 5" in msg for msg in caplog.messages)
+        assert any("None" in msg and "clamped to 5" in msg for msg in caplog.messages)
 
     async def test_child_omitted_inherits_silently(self, caplog) -> None:
         """A child that omits max_delegation_depth inherits without warning."""
@@ -1143,3 +1143,29 @@ class TestMaxDelegationDepth:
         clamp_msgs = [m for m in caplog.messages if "clamped" in m]
         assert len(clamp_msgs) == 1
         assert "100 clamped to 3" in clamp_msgs[0]
+
+    async def test_root_run_no_kwarg_no_agent_default_gets_runner_default(self) -> None:
+        """Root run with neither explicit kwarg nor agent default → runner picks 10."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+        # No max_delegation_depth on agent or run call
+        agent = Agent(prompt="Test.", tools=[capture_context], provider=llm)
+
+        await agent.run("go")
+
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 10  # runner default

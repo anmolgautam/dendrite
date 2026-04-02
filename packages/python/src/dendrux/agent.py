@@ -177,6 +177,30 @@ class Agent:
         return self._provider
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _require_provider(self) -> LLMProvider:
+        """Return the provider or raise if not configured."""
+        if self._provider is None:
+            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        return self._provider
+
+    def _resolve_run_max_delegation_depth(self, requested: Any) -> Any:
+        """Resolve max_delegation_depth for a run/stream call.
+
+        Returns the value to pass to the runner, or _UNSET if the runner
+        should handle parent/default logic itself.
+
+        Precedence: explicit run kwarg → agent default → _UNSET (runner decides).
+        """
+        if requested is not _UNSET:
+            return requested
+        if self.max_delegation_depth is not _UNSET:
+            return self.max_delegation_depth
+        return _UNSET
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
@@ -335,23 +359,20 @@ class Agent:
                 max_delegation_depth from a parent run.
         """
         _validate_max_delegation_depth(max_delegation_depth)
-        if self._provider is None:
-            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        provider = self._require_provider()
 
         store = await self._resolve_state_store()
 
         from dendrux.runtime.runner import run as runner_run
 
-        # Resolve depth: explicit run kwarg → agent default → let runner decide
         run_kwargs: dict[str, Any] = {}
-        if max_delegation_depth is not _UNSET:
-            run_kwargs["max_delegation_depth"] = max_delegation_depth
-        elif self.max_delegation_depth is not _UNSET:
-            run_kwargs["max_delegation_depth"] = self.max_delegation_depth
+        resolved_depth = self._resolve_run_max_delegation_depth(max_delegation_depth)
+        if resolved_depth is not _UNSET:
+            run_kwargs["max_delegation_depth"] = resolved_depth
 
         return await runner_run(
             self,
-            provider=self._provider,
+            provider=provider,
             user_input=user_input,
             state_store=store,
             tenant_id=tenant_id,
@@ -391,8 +412,7 @@ class Agent:
                 both args provided, or neither provided.
         """
         # Validate args before any I/O
-        if self._provider is None:
-            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        provider = self._require_provider()
         if tool_results is not None and user_input is not None:
             raise ValueError("Cannot provide both tool_results and user_input to resume().")
         if tool_results is None and user_input is None:
@@ -417,7 +437,7 @@ class Agent:
                 tool_results,
                 state_store=store,
                 agent=self,
-                provider=self._provider,
+                provider=provider,
                 redact=self._redact,
                 extra_observer=observer,
             )
@@ -427,7 +447,7 @@ class Agent:
             user_input,  # type: ignore[arg-type]
             state_store=store,
             agent=self,
-            provider=self._provider,
+            provider=provider,
             redact=self._redact,
             extra_observer=observer,
         )
@@ -482,21 +502,18 @@ class Agent:
             ValueError: If no provider is configured.
         """
         _validate_max_delegation_depth(max_delegation_depth)
-        if self._provider is None:
-            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        provider = self._require_provider()
 
         from dendrux.runtime.runner import run_stream as runner_run_stream
 
-        # Resolve depth: explicit run kwarg → agent default → let runner decide
         stream_kwargs: dict[str, Any] = {}
-        if max_delegation_depth is not _UNSET:
-            stream_kwargs["max_delegation_depth"] = max_delegation_depth
-        elif self.max_delegation_depth is not _UNSET:
-            stream_kwargs["max_delegation_depth"] = self.max_delegation_depth
+        resolved_depth = self._resolve_run_max_delegation_depth(max_delegation_depth)
+        if resolved_depth is not _UNSET:
+            stream_kwargs["max_delegation_depth"] = resolved_depth
 
         return runner_run_stream(
             self,
-            provider=self._provider,
+            provider=provider,
             user_input=user_input,
             state_store_resolver=self._resolve_state_store,
             tenant_id=tenant_id,
@@ -542,8 +559,7 @@ class Agent:
         Raises:
             ValueError: If provider not set, both args provided, or neither.
         """
-        if self._provider is None:
-            raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
+        provider = self._require_provider()
         if tool_results is not None and user_input is not None:
             raise ValueError("Cannot provide both tool_results and user_input to resume_stream().")
         if tool_results is None and user_input is None:
@@ -556,7 +572,7 @@ class Agent:
         return runner_resume_stream(
             run_id,
             agent=self,
-            provider=self._provider,
+            provider=provider,
             state_store_resolver=self._resolve_state_store,
             tool_results=tool_results,
             user_input=user_input,

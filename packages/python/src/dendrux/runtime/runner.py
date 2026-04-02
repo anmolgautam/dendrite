@@ -95,6 +95,62 @@ async def _emit_event(
 _UNSET_DEPTH: Any = object()
 
 
+def _resolve_max_delegation_depth(
+    requested: Any,
+    parent_ctx: DelegationContext | None,
+) -> int | None:
+    """Resolve effective max_delegation_depth from explicit value + parent context.
+
+    Pure policy helper — no I/O, no persistence, no parent linking.
+
+    Resolution order:
+      1. Explicit requested value (even None = unbounded)
+      2. Inherit from parent context
+      3. Default 10 (root run)
+
+    Tighten-only rule: a child can never loosen the parent's limit.
+    Warns (deduplicated per parent run) when an explicit child value is clamped.
+    """
+    # --- Validation ---
+    if (
+        requested is not _UNSET_DEPTH
+        and requested is not None
+        and (not isinstance(requested, int) or requested < 0)
+    ):
+        raise ValueError(
+            f"max_delegation_depth must be a non-negative integer or None, "
+            f"got {requested!r}"
+        )
+
+    # --- Resolution ---
+    if requested is not _UNSET_DEPTH:
+        effective = requested
+    elif parent_ctx is not None:
+        effective = parent_ctx.max_delegation_depth
+    else:
+        effective = 10
+
+    # --- Tighten-only clamp ---
+    if parent_ctx is not None and parent_ctx.max_delegation_depth is not None:
+        parent_limit = parent_ctx.max_delegation_depth
+        if effective is None or (isinstance(effective, int) and effective > parent_limit):
+            # Warn only on explicit loosen attempts, deduplicated per parent run.
+            if (
+                requested is not _UNSET_DEPTH
+                and "depth_clamped" not in parent_ctx.warned_mismatches
+            ):
+                logger.warning(
+                    "max_delegation_depth=%r clamped to %d "
+                    "(inherited parent limit)",
+                    effective,
+                    parent_limit,
+                )
+                parent_ctx.warned_mismatches.add("depth_clamped")
+            effective = parent_limit
+
+    return effective
+
+
 async def run(
     agent: Agent,
     *,
@@ -156,76 +212,22 @@ async def run(
         result = await run(agent, provider=provider, user_input="What is 15 + 27?")
         print(result.answer)
     """
-    # Validate max_delegation_depth early — before any side effects.
-    if (
-        max_delegation_depth is not _UNSET_DEPTH
-        and max_delegation_depth is not None
-        and (not isinstance(max_delegation_depth, int) or max_delegation_depth < 0)
-    ):
-        raise ValueError(
-            f"max_delegation_depth must be a non-negative integer or None, "
-            f"got {max_delegation_depth!r}"
-        )
+    # Validate + resolve depth early — before any side effects.
+    # _resolve_max_delegation_depth is a pure policy helper; side effect
+    # is limited to dedup warning state on parent_ctx.warned_mismatches.
+    parent_ctx = get_delegation_context()
+    effective_max_depth = _resolve_max_delegation_depth(max_delegation_depth, parent_ctx)
 
     resolved_strategy = strategy or NativeToolCalling()
     resolved_loop = loop or agent.loop or ReActLoop()
-
-    # Extract provider kwargs (temperature, max_tokens, etc.)
-    # before they get consumed. kwargs dict is forwarded to the loop
-    # which forwards to provider.complete().
     provider_kwargs = dict(kwargs) if kwargs else {}
 
-    # Runner owns run_id — single source of truth
     run_id = generate_ulid()
     observer = None
-    # Shared sequence counter for run_events — monotonic across runner + observer
     sequencer = EventSequencer()
 
     # --- Delegation context ---
-    parent_ctx = get_delegation_context()
     parent_run_id, delegation_level = resolve_parent_link(parent_ctx, state_store)
-
-    # Resolve max_delegation_depth early — needed both for metadata and context.
-    #   1. Explicit kwarg → use it (even None, meaning unbounded)
-    #   2. Inherit from parent context (if child run)
-    #   3. Default 10 (root run without explicit kwarg)
-    if max_delegation_depth is not _UNSET_DEPTH:
-        effective_max_depth = max_delegation_depth
-    elif parent_ctx is not None:
-        effective_max_depth = parent_ctx.max_delegation_depth
-    else:
-        effective_max_depth = 10
-
-    # Tighten-only: child can never loosen the parent's limit.
-    # Warn only when an explicit child value would be loosened (not on silent inherit).
-    # Deduplicated per parent run via warned_mismatches set.
-    if parent_ctx is not None and parent_ctx.max_delegation_depth is not None:
-        parent_limit = parent_ctx.max_delegation_depth
-        if effective_max_depth is None:
-            if (
-                max_delegation_depth is not _UNSET_DEPTH
-                and "depth_clamped" not in parent_ctx.warned_mismatches
-            ):
-                logger.warning(
-                    "max_delegation_depth=None (unbounded) clamped to %d "
-                    "(inherited parent limit)",
-                    parent_limit,
-                )
-                parent_ctx.warned_mismatches.add("depth_clamped")
-            effective_max_depth = parent_limit
-        elif effective_max_depth > parent_limit:
-            if (
-                max_delegation_depth is not _UNSET_DEPTH
-                and "depth_clamped" not in parent_ctx.warned_mismatches
-            ):
-                logger.warning(
-                    "max_delegation_depth=%d clamped to %d "
-                    "(inherited parent limit)",
-                    effective_max_depth,
-                    parent_limit,
-                )
-                parent_ctx.warned_mismatches.add("depth_clamped")
-            effective_max_depth = parent_limit
 
     if state_store is not None:
         # Create the run record before the loop starts
@@ -375,7 +377,7 @@ async def run(
                     expected_current_status="running",
                 )
             except Exception:
-                logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)
+                logger.error("Failed to persist ERROR status for run %s", run_id, exc_info=True)
             # Only the CAS winner emits the error event
             if error_won:
                 await _emit_event(
@@ -421,7 +423,10 @@ def run_stream(
         intermediate events (TEXT_DELTA, TOOL_USE_*, TOOL_RESULT).
       - Runner persists loop outcomes before forwarding them.
     """
-    # Validate max_delegation_depth early — synchronous, before generator.
+    # Validate depth early — synchronous, before generator starts.
+    # Full resolution (parent context, clamping) happens inside _generate()
+    # because parent_ctx requires async state_store resolution first.
+    # But validation of the raw input can fail fast here.
     if (
         max_delegation_depth is not _UNSET_DEPTH
         and max_delegation_depth is not None
@@ -467,44 +472,9 @@ def run_stream(
             # --- Delegation context ---
             parent_ctx = get_delegation_context()
             parent_run_id, delegation_level = resolve_parent_link(parent_ctx, store)
-
-            # Resolve depth early — persisted in metadata for resume
-            if max_delegation_depth is not _UNSET_DEPTH:
-                eff_max_depth = max_delegation_depth
-            elif parent_ctx is not None:
-                eff_max_depth = parent_ctx.max_delegation_depth
-            else:
-                eff_max_depth = 10
-
-            # Tighten-only: child can never loosen the parent's limit.
-            # Deduplicated per parent run via warned_mismatches set.
-            if parent_ctx is not None and parent_ctx.max_delegation_depth is not None:
-                parent_limit = parent_ctx.max_delegation_depth
-                if eff_max_depth is None:
-                    if (
-                        max_delegation_depth is not _UNSET_DEPTH
-                        and "depth_clamped" not in parent_ctx.warned_mismatches
-                    ):
-                        logger.warning(
-                            "max_delegation_depth=None (unbounded) clamped to %d "
-                            "(inherited parent limit)",
-                            parent_limit,
-                        )
-                        parent_ctx.warned_mismatches.add("depth_clamped")
-                    eff_max_depth = parent_limit
-                elif eff_max_depth > parent_limit:
-                    if (
-                        max_delegation_depth is not _UNSET_DEPTH
-                        and "depth_clamped" not in parent_ctx.warned_mismatches
-                    ):
-                        logger.warning(
-                            "max_delegation_depth=%d clamped to %d "
-                            "(inherited parent limit)",
-                            eff_max_depth,
-                            parent_limit,
-                        )
-                        parent_ctx.warned_mismatches.add("depth_clamped")
-                    eff_max_depth = parent_limit
+            eff_max_depth = _resolve_max_delegation_depth(
+                max_delegation_depth, parent_ctx
+            )
 
             observer = None
 
@@ -656,7 +626,7 @@ def run_stream(
                         expected_current_status="running",
                     )
                 except Exception:
-                    logger.warning(
+                    logger.error(
                         "Failed to persist ERROR status for run %s", run_id, exc_info=True
                     )
                 if error_won:
@@ -700,7 +670,7 @@ def run_stream(
                         store, run_id, "run.cancelled", sequencer, {}
                     )
             except Exception:
-                logger.warning(
+                logger.error(
                     "Failed to cancel run %s during stream cleanup", run_id, exc_info=True
                 )
 
@@ -1100,7 +1070,7 @@ async def _resume_core(
                 expected_current_status="running",
             )
         except Exception:
-            logger.warning("Failed to persist ERROR status for run %s", run_id, exc_info=True)
+            logger.error("Failed to persist ERROR status for run %s", run_id, exc_info=True)
         if error_won:
             await _emit_event(
                 state_store, run_id, "run.error", ctx.sequencer, {"error": str(exc)[:500]}
@@ -1308,7 +1278,7 @@ def resume_stream(
                         expected_current_status="running",
                     )
                 except Exception:
-                    logger.warning(
+                    logger.error(
                         "Failed to persist ERROR status for run %s", run_id, exc_info=True
                     )
                 if error_won:
@@ -1347,7 +1317,7 @@ def resume_stream(
                         store, run_id, "run.cancelled", sequencer, {}
                     )
             except Exception:
-                logger.warning(
+                logger.error(
                     "Failed to cancel run %s during resume stream cleanup",
                     run_id,
                     exc_info=True,

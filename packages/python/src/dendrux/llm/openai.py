@@ -14,6 +14,7 @@ No business logic, no agent loop awareness. Just shape translation.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from dendrux.types import Message, ToolDef
+
+logger = logging.getLogger(__name__)
 
 # OpenAI-specific kwargs that complete() will forward to the API.
 _SUPPORTED_KWARGS = frozenset(
@@ -235,6 +238,11 @@ class OpenAIProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: OpenAIProvider(model=..., timeout=300)"
             ) from None
+        except openai.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to OpenAI API failed. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         llm_response = self._normalize_response(response)
 
@@ -279,6 +287,11 @@ class OpenAIProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: OpenAIProvider(model=..., timeout=300)"
             ) from None
+        except openai.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to OpenAI API failed during streaming. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         # Accumulators for building the final LLMResponse
         text_parts: list[str] = []
@@ -355,6 +368,19 @@ class OpenAIProvider(LLMProvider):
                         try:
                             params = json.loads(raw_json) if raw_json else {}
                         except json.JSONDecodeError:
+                            logger.warning(
+                                "Malformed tool call JSON in stream — "
+                                "provider=%s model=%s tool=%s call_id=%s "
+                                "raw_len=%d",
+                                "openai",
+                                self._model,
+                                buf.name,
+                                buf.tool_call_id,
+                                len(raw_json),
+                            )
+                            params = {}
+
+                        if not isinstance(params, dict):
                             params = {}
 
                         # Ensure START was emitted even if name arrived late
@@ -364,6 +390,15 @@ class OpenAIProvider(LLMProvider):
                                 type=StreamEventType.TOOL_USE_START,
                                 tool_name=buf.name,
                                 tool_call_id=buf.tool_call_id,
+                            )
+
+                        if buf.name is None:
+                            logger.warning(
+                                "Tool call completed with no name — "
+                                "provider=%s model=%s call_id=%s",
+                                "openai",
+                                self._model,
+                                buf.tool_call_id,
                             )
 
                         tc = ToolCall(
@@ -497,6 +532,11 @@ class OpenAIProvider(LLMProvider):
 
     def _normalize_response(self, response: Any) -> LLMResponse:
         """Convert OpenAI ChatCompletion to Dendrux LLMResponse."""
+        if not response.choices:
+            raise RuntimeError(
+                "OpenAI returned a ChatCompletion with no choices. "
+                f"Model: {self._model}"
+            )
         choice = response.choices[0]
         message = choice.message
 

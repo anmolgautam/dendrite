@@ -11,6 +11,7 @@ No business logic, no agent loop awareness. Just shape translation.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 import anthropic
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from dendrux.types import Message, ToolDef
+
+logger = logging.getLogger(__name__)
 
 # Anthropic-specific kwargs that complete() will forward to the API.
 # Anything not in this set is silently ignored to prevent leaking
@@ -172,6 +175,11 @@ class AnthropicProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: AnthropicProvider(model=..., timeout=300)"
             ) from None
+        except anthropic.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to Anthropic API failed. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         llm_response = self._normalize_response(response)
 
@@ -239,10 +247,22 @@ class AnthropicProvider(LLMProvider):
                             try:
                                 params = json.loads(raw_json) if raw_json else {}
                             except json.JSONDecodeError:
+                                logger.warning(
+                                    "Malformed tool call JSON in stream — "
+                                    "provider=%s model=%s tool=%s call_id=%s "
+                                    "raw_len=%d",
+                                    "anthropic",
+                                    self._model,
+                                    _current_tool_name,
+                                    _current_tool_id,
+                                    len(raw_json),
+                                )
+                                params = {}
+                            if not isinstance(params, dict):
                                 params = {}
                             tc = ToolCall(
                                 name=_current_tool_name,
-                                params=params if isinstance(params, dict) else {},
+                                params=params,
                                 provider_tool_call_id=_current_tool_id,
                             )
                             tool_calls.append(tc)
@@ -265,6 +285,11 @@ class AnthropicProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: AnthropicProvider(model=..., timeout=300)"
             ) from None
+        except anthropic.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to Anthropic API lost during streaming. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         usage = UsageStats(
             input_tokens=final_message.usage.input_tokens,

@@ -13,6 +13,7 @@ No business logic, no agent loop awareness. Just shape translation.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from dendrux.types import Message, ToolDef
+
+logger = logging.getLogger(__name__)
 
 # Responses-API kwargs that complete() will forward.
 _SUPPORTED_KWARGS = frozenset(
@@ -242,6 +245,11 @@ class OpenAIResponsesProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: OpenAIResponsesProvider(model=..., timeout=300)"
             ) from None
+        except openai.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to OpenAI Responses API failed. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         llm_response = self._normalize_response(response)
 
@@ -284,6 +292,11 @@ class OpenAIResponsesProvider(LLMProvider):
                 f"The model may need more time for large outputs. "
                 f"Increase timeout: OpenAIResponsesProvider(model=..., timeout=300)"
             ) from None
+        except openai.APIConnectionError as exc:
+            raise ConnectionError(
+                f"Connection to OpenAI Responses API failed during streaming. "
+                f"Model: {self._model}. Original error: {exc}"
+            ) from exc
 
         # Accumulators for building the final LLMResponse
         text_parts: list[str] = []
@@ -331,11 +344,30 @@ class OpenAIResponsesProvider(LLMProvider):
                 try:
                     params = json.loads(raw_args) if raw_args else {}
                 except json.JSONDecodeError:
+                    logger.warning(
+                        "Malformed tool call JSON in stream — "
+                        "provider=%s model=%s item_id=%s raw_len=%d",
+                        "openai_responses",
+                        self._model,
+                        item_id,
+                        len(raw_args) if raw_args else 0,
+                    )
+                    params = {}
+
+                if not isinstance(params, dict):
                     params = {}
 
                 name, call_id = _active_calls.pop(
                     item_id, ("unknown", item_id)
                 )
+                if name == "unknown":
+                    logger.warning(
+                        "Tool call completed with no matching start event — "
+                        "provider=%s model=%s item_id=%s",
+                        "openai_responses",
+                        self._model,
+                        item_id,
+                    )
                 tc = ToolCall(
                     name=name,
                     params=params if isinstance(params, dict) else {},

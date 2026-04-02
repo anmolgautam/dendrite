@@ -26,14 +26,30 @@ def _identity(s: str) -> str:
     return s
 
 
-def _redact_value(v: Any, redact: Callable[[str], str]) -> Any:
-    """Recursively apply a string redactor to all string values."""
+def _redact_value(
+    v: Any, redact: Callable[[str], str], _stack: set[int] | None = None
+) -> Any:
+    """Recursively apply a string redactor to all string values.
+
+    Uses an active recursion stack (not a global visited set) so that
+    shared sub-objects are redacted correctly on every path, while true
+    cycles are replaced with a JSON-safe placeholder.
+    """
     if isinstance(v, str):
         return redact(v)
-    if isinstance(v, dict):
-        return {k: _redact_value(val, redact) for k, val in v.items()}
-    if isinstance(v, list):
-        return [_redact_value(item, redact) for item in v]
+    if isinstance(v, (dict, list)):
+        obj_id = id(v)
+        if _stack is None:
+            _stack = set()
+        if obj_id in _stack:
+            return "[circular]"
+        _stack.add(obj_id)
+        try:
+            if isinstance(v, dict):
+                return {k: _redact_value(val, redact, _stack) for k, val in v.items()}
+            return [_redact_value(item, redact, _stack) for item in v]
+        finally:
+            _stack.discard(obj_id)
     return v
 
 

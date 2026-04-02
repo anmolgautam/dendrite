@@ -1126,3 +1126,118 @@ class TestCompleteStream:
         assert done.raw.provider_response["object"] == "chat.completion.chunked"
         assert done.raw.provider_response["finish_reason"] == "stop"
         assert done.raw.provider_response["usage"]["prompt_tokens"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 hardening tests
+# ---------------------------------------------------------------------------
+class TestBoundaryHardening:
+    """Crash-proofing and degradation logging tests."""
+
+    def test_normalize_empty_choices_raises(self, provider: OpenAIProvider) -> None:
+        """_normalize_response raises RuntimeError if choices list is empty."""
+        response = FakeChatCompletion(choices=[])
+        with pytest.raises(RuntimeError, match="no choices"):
+            provider._normalize_response(response)
+
+    async def test_stream_malformed_json_logs_warning(
+        self, provider: OpenAIProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed tool call JSON in stream logs a warning with context."""
+        chunks = [
+            FakeChunk(
+                choices=[
+                    FakeStreamChoice(
+                        delta=FakeDelta(
+                            tool_calls=[
+                                FakeDeltaToolCall(
+                                    index=0,
+                                    id="call_1",
+                                    function=FakeDeltaFunction(name="broken", arguments="{bad"),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            FakeChunk(choices=[FakeStreamChoice(delta=FakeDelta(), finish_reason="tool_calls")]),
+            FakeChunk(choices=[], usage=FakeChunkUsage()),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=MockAsyncStream(chunks))
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dendrux.llm.openai"):
+            events = []
+            async for event in provider.complete_stream(
+                [Message(role=Role.USER, content="go")],
+            ):
+                events.append(event)
+
+        assert any("Malformed tool call JSON" in r.message for r in caplog.records)
+        assert any("provider=openai" in r.message for r in caplog.records)
+        # Tool call should still be emitted with empty params
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call.params == {}
+
+    async def test_stream_unknown_tool_name_logs_warning(
+        self, provider: OpenAIProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Tool call with no name in stream logs a warning."""
+        chunks = [
+            # Arg fragment without name
+            FakeChunk(
+                choices=[
+                    FakeStreamChoice(
+                        delta=FakeDelta(
+                            tool_calls=[
+                                FakeDeltaToolCall(
+                                    index=0,
+                                    id="call_1",
+                                    function=FakeDeltaFunction(name=None, arguments='{"a":1}'),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            FakeChunk(choices=[FakeStreamChoice(delta=FakeDelta(), finish_reason="tool_calls")]),
+            FakeChunk(choices=[], usage=FakeChunkUsage()),
+        ]
+        provider._client.chat.completions.create = AsyncMock(return_value=MockAsyncStream(chunks))
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dendrux.llm.openai"):
+            events = []
+            async for event in provider.complete_stream(
+                [Message(role=Role.USER, content="go")],
+            ):
+                events.append(event)
+
+        assert any("Tool call completed with no name" in r.message for r in caplog.records)
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
+        assert end.tool_call.name == "unknown"
+
+    async def test_complete_connection_error_mapped(
+        self, provider: OpenAIProvider
+    ) -> None:
+        """APIConnectionError → ConnectionError with model context."""
+        provider._client.chat.completions.create = AsyncMock(
+            side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to OpenAI API failed"):
+            await provider.complete([Message(role=Role.USER, content="Hi")])
+
+    async def test_stream_connection_error_mapped(
+        self, provider: OpenAIProvider
+    ) -> None:
+        """Streaming APIConnectionError → ConnectionError with model context."""
+        provider._client.chat.completions.create = AsyncMock(
+            side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]
+        )
+        with pytest.raises(ConnectionError, match="Connection to OpenAI API failed"):
+            async for _ in provider.complete_stream(
+                [Message(role=Role.USER, content="Hi")],
+            ):
+                pass  # pragma: no cover
