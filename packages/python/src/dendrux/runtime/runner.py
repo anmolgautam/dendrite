@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import Loop
+    from dendrux.loops.base import Loop, LoopObserver
     from dendrux.runtime.state import StateStore
     from dendrux.strategies.base import Strategy
     from dendrux.types import Message, RunEvent, RunResult, RunStream, ToolResult
@@ -162,7 +162,7 @@ async def run(
     tenant_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
     max_delegation_depth: int | None = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunResult:
@@ -223,7 +223,7 @@ async def run(
     provider_kwargs = dict(kwargs) if kwargs else {}
 
     run_id = generate_ulid()
-    observer = None
+    observer: LoopObserver | None = None
     sequencer = EventSequencer()
 
     # --- Delegation context ---
@@ -401,7 +401,7 @@ def run_stream(
     tenant_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
     max_delegation_depth: int | None = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunStream:
@@ -476,7 +476,7 @@ def run_stream(
                 max_delegation_depth, parent_ctx
             )
 
-            observer = None
+            observer: LoopObserver | None = None
 
             if store is not None:
                 redacted_input = redact(user_input) if redact else user_input
@@ -687,7 +687,7 @@ async def resume(
     strategy: Strategy | None = None,
     loop: Loop | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
 ) -> RunResult:
     """Resume a paused run by providing client tool results.
 
@@ -730,7 +730,7 @@ async def resume_with_input(
     strategy: Strategy | None = None,
     loop: Loop | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
 ) -> RunResult:
     """Resume a paused run by providing clarification input.
 
@@ -779,7 +779,7 @@ class _ResumeContext:
         self,
         *,
         history: list[Message],
-        observer: Any,
+        observer: LoopObserver,
         sequencer: EventSequencer,
         pause_state: PauseState,
         resolved_loop: Loop,
@@ -806,7 +806,7 @@ async def _prepare_resume(
     expected_status: str,
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
 ) -> _ResumeContext:
     """Build everything needed to re-enter the loop after a resume.
 
@@ -878,7 +878,7 @@ async def _prepare_resume(
         event_sequencer=sequencer,
     )
 
-    observer: Any
+    observer: LoopObserver
     if extra_observer is not None:
         from dendrux.observers.composite import CompositeObserver
 
@@ -918,7 +918,7 @@ async def _resume_core(
     expected_status: str,
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
     _skip_claim: bool = False,
 ) -> RunResult:
     """Shared resume logic for tool results and clarification input.
@@ -1091,7 +1091,7 @@ def resume_stream(
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
 ) -> RunStream:
     """Stream a resumed run as RunEvents, returning a RunStream.
 
@@ -1333,7 +1333,7 @@ async def resume_claimed(
     agent: Agent,
     provider: LLMProvider,
     redact: Callable[[str], str] | None = None,
-    extra_observer: Any | None = None,
+    extra_observer: LoopObserver | None = None,
 ) -> RunResult:
     """Resume a run that was already claimed via submit_and_claim().
 

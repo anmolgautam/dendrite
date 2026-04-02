@@ -16,7 +16,7 @@ from dendrux.loops.base import LoopObserver
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from dendrux.types import LLMResponse, Message, ToolCall, ToolResult
+    from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class TransportObserver(LoopObserver):
         iteration: int,
         *,
         semantic_messages: list[Message] | None = None,
-        semantic_tools: Any | None = None,
+        semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
     ) -> None:
         await self._queue.put(

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dendrux.runtime.state import StateStore
-    from dendrux.types import LLMResponse, Message, ToolCall, ToolResult, ToolTarget
+    from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult, ToolTarget
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ class PersistenceObserver(LoopObserver):
         iteration: int,
         *,
         semantic_messages: list[Message] | None = None,
-        semantic_tools: list[Any] | None = None,
+        semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
     ) -> None:
         """Persist LLM interaction (primary) + token usage (legacy) and record event."""

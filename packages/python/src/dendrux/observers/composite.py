@@ -7,12 +7,12 @@ so it can be used in script-mode runs without requiring FastAPI.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from dendrux.loops.base import LoopObserver
 
 if TYPE_CHECKING:
-    from dendrux.types import LLMResponse, Message, ToolCall, ToolResult
+    from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class CompositeObserver(LoopObserver):
         iteration: int,
         *,
         semantic_messages: list[Message] | None = None,
-        semantic_tools: Any | None = None,
+        semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
     ) -> None:
         for obs in self._observers:

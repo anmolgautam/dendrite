@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,6 +20,9 @@ from rich.rule import Rule
 from rich.table import Table
 
 from dendrux.types import Message, Role, ToolCall, ToolResult
+
+if TYPE_CHECKING:
+    from dendrux.types import LLMResponse, RunResult, ToolDef
 
 _console = Console()
 
@@ -88,14 +91,16 @@ class ConsoleObserver:
 
     async def on_llm_call_completed(
         self,
-        response: Any,
+        response: LLMResponse,
         iteration: int,
-        **kwargs: Any,
+        *,
+        semantic_messages: list[Message] | None = None,
+        semantic_tools: list[ToolDef] | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         """Called after an LLM call completes."""
         tokens = response.usage.total_tokens if response.usage else 0
         self._total_tokens += tokens
-        duration_ms = kwargs.get("duration_ms")
         duration_str = f" in {duration_ms / 1000:.1f}s" if duration_ms else ""
 
         _console.print(
@@ -132,7 +137,7 @@ class ConsoleObserver:
                     f"  [red]  fail[/red]    [bold]{tool_call.name}[/bold]{duration_str}"
                 )
 
-    def print_summary(self, result: Any) -> None:
+    def print_summary(self, result: RunResult) -> None:
         """Print a final summary panel. Call after agent.run() completes."""
         total_time = time.monotonic() - self._run_start if self._run_start else 0
 

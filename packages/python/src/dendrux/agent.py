@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import Loop
+    from dendrux.loops.base import Loop, LoopObserver
     from dendrux.runtime.state import StateStore
     from dendrux.types import RunResult, RunStream, ToolDef, ToolResult
 
@@ -329,7 +329,7 @@ class Agent:
         *,
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        observer: Any | None = None,
+        observer: LoopObserver | None = None,
         max_delegation_depth: int | None = _UNSET,
         **kwargs: Any,
     ) -> RunResult:
@@ -389,7 +389,7 @@ class Agent:
         *,
         tool_results: list[ToolResult] | None = None,
         user_input: str | None = None,
-        observer: Any | None = None,
+        observer: LoopObserver | None = None,
     ) -> RunResult:
         """Resume a paused run.
 
@@ -458,7 +458,7 @@ class Agent:
         *,
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        observer: Any | None = None,
+        observer: LoopObserver | None = None,
         max_delegation_depth: int | None = _UNSET,
         **kwargs: Any,
     ) -> RunStream:
@@ -530,7 +530,7 @@ class Agent:
         *,
         tool_results: list[ToolResult] | None = None,
         user_input: str | None = None,
-        observer: Any | None = None,
+        observer: LoopObserver | None = None,
     ) -> RunStream:
         """Stream a resumed run as RunEvents.
 

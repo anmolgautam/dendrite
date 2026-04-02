@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         RunEvent,
         RunResult,
         ToolCall,
+        ToolDef,
         ToolResult,
         UsageStats,
     )
@@ -66,7 +67,7 @@ class LoopObserver(Protocol):
         iteration: int,
         *,
         semantic_messages: list[Message] | None = None,
-        semantic_tools: list[Any] | None = None,
+        semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
     ) -> None:
         """Called after provider.complete() returns.
