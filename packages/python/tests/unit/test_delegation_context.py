@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from dendrux import Agent, tool
 from dendrux.llm.mock import MockLLM
 from dendrux.runtime.context import (
     DelegationContext,
+    DelegationDepthExceededError,
     get_delegation_context,
     get_store_identity,
     reset_delegation_context,
@@ -450,3 +453,693 @@ class TestDelegationRunnerIntegration:
         child_created = store.created_runs[0]
         assert child_created.get("parent_run_id") is None
         assert child_created["delegation_level"] == 1
+
+
+# ------------------------------------------------------------------
+# max_delegation_depth tests
+# ------------------------------------------------------------------
+
+
+class TestMaxDelegationDepth:
+    """Tests for the delegation depth safety guard."""
+
+    def test_resolve_parent_link_within_limit(self) -> None:
+        """Child at depth 1 with max_depth=2 is allowed."""
+        parent = DelegationContext(
+            run_id="parent",
+            delegation_level=0,
+            persisted=True,
+            store_identity="sqlite:///test.db",
+            max_delegation_depth=2,
+        )
+        child_store = FakeStoreWithIdentity("sqlite:///test.db")
+        parent_run_id, level = resolve_parent_link(parent, child_store)
+        assert parent_run_id == "parent"
+        assert level == 1
+
+    def test_resolve_parent_link_at_limit(self) -> None:
+        """Child at depth exactly equal to max is allowed."""
+        parent = DelegationContext(
+            run_id="parent",
+            delegation_level=1,
+            persisted=True,
+            store_identity="sqlite:///test.db",
+            max_delegation_depth=2,
+        )
+        child_store = FakeStoreWithIdentity("sqlite:///test.db")
+        parent_run_id, level = resolve_parent_link(parent, child_store)
+        assert parent_run_id == "parent"
+        assert level == 2
+
+    def test_resolve_parent_link_exceeds_limit(self) -> None:
+        """Child that would exceed max_depth raises DelegationDepthExceededError."""
+        parent = DelegationContext(
+            run_id="parent",
+            delegation_level=2,
+            persisted=True,
+            store_identity="sqlite:///test.db",
+            max_delegation_depth=2,
+        )
+        child_store = FakeStoreWithIdentity("sqlite:///test.db")
+        with pytest.raises(DelegationDepthExceededError) as exc_info:
+            resolve_parent_link(parent, child_store)
+        assert exc_info.value.delegation_level == 3
+        assert exc_info.value.max_depth == 2
+
+    def test_unbounded_depth(self) -> None:
+        """max_delegation_depth=None means no limit."""
+        parent = DelegationContext(
+            run_id="parent",
+            delegation_level=100,
+            persisted=True,
+            store_identity="sqlite:///test.db",
+            max_delegation_depth=None,
+        )
+        child_store = FakeStoreWithIdentity("sqlite:///test.db")
+        parent_run_id, level = resolve_parent_link(parent, child_store)
+        assert parent_run_id == "parent"
+        assert level == 101
+
+    def test_depth_zero_blocks_all_children(self) -> None:
+        """max_delegation_depth=0 blocks any child run."""
+        parent = DelegationContext(
+            run_id="parent",
+            delegation_level=0,
+            persisted=True,
+            store_identity="sqlite:///test.db",
+            max_delegation_depth=0,
+        )
+        child_store = FakeStoreWithIdentity("sqlite:///test.db")
+        with pytest.raises(DelegationDepthExceededError):
+            resolve_parent_link(parent, child_store)
+
+    async def test_depth_exceeded_blocks_child_creation(self) -> None:
+        """DelegationDepthExceededError prevents child run from being created.
+
+        The error is caught by the tool executor (returned as tool error to
+        the LLM). The parent run completes; the child was never created.
+        """
+        child_store = RecordingStateStore()
+        parent_store = RecordingStateStore()
+
+        child_agent = Agent(prompt="Helper.", tools=[add])
+
+        @tool()
+        async def delegate(task: str) -> str:
+            """Delegate to child agent."""
+            result = await run(
+                child_agent,
+                provider=MockLLM([LLMResponse(text="helped")]),
+                user_input=task,
+                state_store=child_store,
+            )
+            return result.answer or ""
+
+        parent_agent = Agent(prompt="Test.", tools=[delegate])
+
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        # max_delegation_depth=0 means no children allowed
+        result = await run(
+            parent_agent,
+            provider=parent_llm,
+            user_input="go",
+            state_store=parent_store,
+            max_delegation_depth=0,
+        )
+
+        # Parent completed (tool error was handled gracefully by ReAct loop)
+        assert result.answer == "done"
+        # Parent was created
+        assert len(parent_store.created_runs) == 1
+        # Child was NOT created — blocked by depth guard
+        assert len(child_store.created_runs) == 0
+
+    async def test_depth_limit_propagates_to_children(self) -> None:
+        """max_delegation_depth propagates through context to nested runs."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        agent = Agent(prompt="Test.", tools=[capture_context])
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(
+            agent,
+            provider=llm,
+            user_input="go",
+            max_delegation_depth=5,
+        )
+
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 5
+
+    async def test_default_depth_is_10(self) -> None:
+        """Default max_delegation_depth is 10 when not explicitly set."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        agent = Agent(prompt="Test.", tools=[capture_context])
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(agent, provider=llm, user_input="go")
+
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 10
+
+    async def test_explicit_none_means_unbounded(self) -> None:
+        """max_delegation_depth=None explicitly sets unbounded."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        agent = Agent(prompt="Test.", tools=[capture_context])
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(agent, provider=llm, user_input="go", max_delegation_depth=None)
+
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth is None
+
+    async def test_depth_persisted_in_run_metadata(self) -> None:
+        """max_delegation_depth is written to run metadata for resume."""
+        store = RecordingStateStore()
+        agent = Agent(prompt="Test.", tools=[add])
+        llm = MockLLM([LLMResponse(text="done")])
+
+        await run(
+            agent, provider=llm, user_input="go",
+            state_store=store, max_delegation_depth=7,
+        )
+
+        assert len(store.created_runs) == 1
+        meta = store.created_runs[0].get("meta", {})
+        assert meta["dendrux.max_delegation_depth"] == 7
+
+    async def test_unbounded_depth_not_persisted(self) -> None:
+        """max_delegation_depth=None means no key in metadata."""
+        store = RecordingStateStore()
+        agent = Agent(prompt="Test.", tools=[add])
+        llm = MockLLM([LLMResponse(text="done")])
+
+        await run(
+            agent, provider=llm, user_input="go",
+            state_store=store, max_delegation_depth=None,
+        )
+
+        meta = store.created_runs[0].get("meta", {})
+        assert "dendrux.max_delegation_depth" not in meta
+
+    async def test_negative_depth_raises_value_error(self) -> None:
+        """Negative max_delegation_depth raises ValueError at the Agent level."""
+        agent = Agent(prompt="Test.", tools=[add])
+
+        with pytest.raises(ValueError, match="non-negative integer"):
+            await agent.run("go", max_delegation_depth=-1)
+
+    async def test_negative_depth_raises_on_runner_run(self) -> None:
+        """Negative max_delegation_depth raises ValueError on dendrux.run() too."""
+        agent = Agent(prompt="Test.", tools=[add])
+        llm = MockLLM([LLMResponse(text="done")])
+
+        with pytest.raises(ValueError, match="non-negative integer"):
+            await run(agent, provider=llm, user_input="go", max_delegation_depth=-1)
+
+    def test_negative_depth_raises_on_runner_run_stream(self) -> None:
+        """Negative max_delegation_depth raises ValueError on run_stream() too."""
+        from dendrux.runtime.runner import run_stream
+
+        agent = Agent(prompt="Test.", tools=[add])
+        llm = MockLLM([LLMResponse(text="done")])
+
+        with pytest.raises(ValueError, match="non-negative integer"):
+            run_stream(agent, provider=llm, user_input="go", max_delegation_depth=-1)
+
+    async def test_child_cannot_loosen_parent_depth(self) -> None:
+        """A child run that sets a higher depth gets clamped with a warning."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn a child that tries to loosen the depth limit."""
+            child_agent = Agent(prompt="Child.", tools=[capture_inner])
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            # Child tries to set depth=100, but parent is 3
+            await run(
+                child_agent,
+                provider=child_llm,
+                user_input="go",
+                max_delegation_depth=100,
+            )
+            return "spawned"
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context inside the child."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(
+            parent_agent, provider=parent_llm, user_input="go",
+            max_delegation_depth=3,
+        )
+
+        # Child's context should have depth clamped to 3, not 100
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 3
+
+    async def test_child_loosen_emits_warning(self, caplog) -> None:
+        """Explicit child loosen emits a warning with requested and effective values."""
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn child with loosened depth."""
+            child_agent = Agent(prompt="Child.", tools=[noop])
+            child_llm = MockLLM([LLMResponse(text="done")])
+            await run(
+                child_agent, provider=child_llm, user_input="go",
+                max_delegation_depth=100,
+            )
+            return "ok"
+
+        @tool()
+        async def noop(msg: str) -> str:
+            """No-op."""
+            return "ok"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
+            await run(
+                parent_agent, provider=parent_llm, user_input="go",
+                max_delegation_depth=3,
+            )
+
+        assert any("100 clamped to 3" in msg for msg in caplog.messages)
+
+    async def test_child_can_tighten_parent_depth(self) -> None:
+        """A child run that sets a lower depth is allowed (no warning)."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn a child that tightens the depth limit."""
+            child_agent = Agent(prompt="Child.", tools=[capture_inner])
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            # Child tightens from 10 → 2
+            await run(
+                child_agent,
+                provider=child_llm,
+                user_input="go",
+                max_delegation_depth=2,
+            )
+            return "spawned"
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context inside the child."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=10)
+
+        # Child's context should have depth=2 (tighter than parent's 10)
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 2
+
+    async def test_child_unbounded_clamped_to_parent(self, caplog) -> None:
+        """A child that sets None (unbounded) gets clamped with a warning."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn a child that tries unbounded depth."""
+            child_agent = Agent(prompt="Child.", tools=[capture_inner])
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            # Child tries unbounded, but parent has limit=5
+            await run(
+                child_agent,
+                provider=child_llm,
+                user_input="go",
+                max_delegation_depth=None,
+            )
+            return "spawned"
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context inside the child."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
+            await run(
+                parent_agent, provider=parent_llm, user_input="go",
+                max_delegation_depth=5,
+            )
+
+        # Child's context should be clamped to 5, not None
+        assert len(captured_contexts) == 1
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 5
+        # Warning was emitted
+        assert any("unbounded" in msg and "clamped to 5" in msg for msg in caplog.messages)
+
+    async def test_child_omitted_inherits_silently(self, caplog) -> None:
+        """A child that omits max_delegation_depth inherits without warning."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn child without explicit depth."""
+            child_agent = Agent(prompt="Child.", tools=[capture_inner])
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            # No max_delegation_depth — should inherit silently
+            await run(child_agent, provider=child_llm, user_input="go")
+            return "spawned"
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context inside the child."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
+            await run(
+                parent_agent, provider=parent_llm, user_input="go",
+                max_delegation_depth=3,
+            )
+
+        # Inherited parent's limit
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].max_delegation_depth == 3
+        # No warning about clamping
+        assert not any("clamped" in msg for msg in caplog.messages)
+
+    # --- Agent-level default tests ---
+
+    async def test_agent_default_used_on_root_run(self) -> None:
+        """Agent's max_delegation_depth is used when agent.run() omits the kwarg."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+        agent = Agent(
+            prompt="Test.", tools=[capture_context],
+            max_delegation_depth=7, provider=llm,
+        )
+
+        await agent.run("go")
+
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 7
+
+    async def test_run_kwarg_overrides_agent_default(self) -> None:
+        """Explicit agent.run() kwarg takes precedence over agent default."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_context(msg: str) -> str:
+            """Capture current delegation context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+        agent = Agent(
+            prompt="Test.", tools=[capture_context],
+            max_delegation_depth=7, provider=llm,
+        )
+
+        await agent.run("go", max_delegation_depth=3)
+
+        ctx = captured_contexts[0]
+        assert ctx is not None
+        assert ctx.max_delegation_depth == 3
+
+    async def test_child_agent_default_cannot_loosen_parent(self) -> None:
+        """A child agent's default depth cannot loosen the parent's limit."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn child with agent-level default higher than parent's limit."""
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            # Child agent has default=50, but parent limit is 3
+            child_agent = Agent(
+                prompt="Child.", tools=[capture_inner],
+                max_delegation_depth=50, provider=child_llm,
+            )
+            await child_agent.run("go")
+            return "spawned"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=3)
+
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].max_delegation_depth == 3
+
+    async def test_child_agent_default_can_tighten_parent(self) -> None:
+        """A child agent's default depth that is lower than parent is allowed."""
+        captured_contexts: list[DelegationContext | None] = []
+
+        @tool()
+        async def capture_inner(msg: str) -> str:
+            """Capture context."""
+            captured_contexts.append(get_delegation_context())
+            return "ok"
+
+        @tool()
+        async def spawn_child(msg: str) -> str:
+            """Spawn child with agent-level default lower than parent's limit."""
+            child_llm = MockLLM([
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ])
+            child_agent = Agent(
+                prompt="Child.", tools=[capture_inner],
+                max_delegation_depth=2, provider=child_llm,
+            )
+            await child_agent.run("go")
+            return "spawned"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=10)
+
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].max_delegation_depth == 2
+
+    def test_agent_constructor_validates_negative_depth(self) -> None:
+        """Agent constructor rejects negative max_delegation_depth."""
+        with pytest.raises(ValueError, match="non-negative integer"):
+            Agent(prompt="Test.", max_delegation_depth=-1)
+
+    def test_subclass_default_negative_depth_raises(self) -> None:
+        """Subclass with class-level max_delegation_depth=-1 raises at construction."""
+        with pytest.raises(ValueError, match="non-negative integer"):
+            class BadAgent(Agent):
+                prompt = "Bad."
+                max_delegation_depth = -1
+
+            BadAgent()
+
+    async def test_fanout_clamp_warning_deduped(self, caplog) -> None:
+        """Two sibling children both trying to loosen emit only one warning."""
+        @tool()
+        async def noop(msg: str) -> str:
+            """No-op."""
+            return "ok"
+
+        @tool()
+        async def spawn_two(msg: str) -> str:
+            """Spawn two children that both try to loosen."""
+            for _ in range(2):
+                child_agent = Agent(prompt="Child.", tools=[noop])
+                child_llm = MockLLM([LLMResponse(text="done")])
+                await run(
+                    child_agent, provider=child_llm, user_input="go",
+                    max_delegation_depth=100,
+                )
+            return "spawned"
+
+        parent_agent = Agent(prompt="Parent.", tools=[spawn_two])
+        parent_llm = MockLLM([
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(name="spawn_two", params={"msg": "go"})],
+            ),
+            LLMResponse(text="done"),
+        ])
+
+        with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
+            await run(
+                parent_agent, provider=parent_llm, user_input="go",
+                max_delegation_depth=3,
+            )
+
+        # Only one warning, not two
+        clamp_msgs = [m for m in caplog.messages if "clamped" in m]
+        assert len(clamp_msgs) == 1
+        assert "100 clamped to 3" in clamp_msgs[0]

@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchRunDetail } from "@/lib/api";
 import { useDashboardStore } from "@/lib/store";
 import { RunHeader } from "@/components/RunHeader";
+import { DelegationPanel } from "@/components/DelegationPanel";
 import { Timeline } from "@/components/Timeline";
 import { PayloadInspector } from "@/components/PayloadInspector";
 import { TokenBar } from "@/components/TokenBar";
@@ -45,6 +46,7 @@ export function RunDetail() {
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <RunHeader summary={data.summary} systemPrompt={data.system_prompt} />
+      {data.delegation && <DelegationPanel delegation={data.delegation} />}
 
       <main className="flex flex-1 overflow-hidden relative">
         {/* Timeline — takes remaining space */}

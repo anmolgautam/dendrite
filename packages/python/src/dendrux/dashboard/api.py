@@ -22,7 +22,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from dendrux.runtime.state import StateStore
+    from dendrux.runtime.state import DelegationInfo, StateStore
 
 
 def _utc_iso(ts: datetime | None) -> str | None:
@@ -35,6 +35,52 @@ def _utc_iso(ts: datetime | None) -> str | None:
     if ts is None:
         return None
     return ts.isoformat() + "Z"
+
+
+def _delegation_to_dict(info: DelegationInfo) -> dict[str, Any]:
+    """Serialize DelegationInfo to a JSON-safe dict."""
+    parent_dict: dict[str, Any] | None = None
+    if info.parent is not None:
+        parent_dict = {
+            "run_id": info.parent.run_id,
+            "resolved": info.parent.resolved,
+            "agent_name": info.parent.agent_name,
+            "status": info.parent.status,
+            "delegation_level": info.parent.delegation_level,
+        }
+
+    return {
+        "parent": parent_dict,
+        "children": [
+            {
+                "run_id": c.run_id,
+                "agent_name": c.agent_name,
+                "status": c.status,
+                "delegation_level": c.delegation_level,
+            }
+            for c in info.children
+        ],
+        "ancestry": [
+            {
+                "run_id": a.run_id,
+                "agent_name": a.agent_name,
+                "status": a.status,
+                "delegation_level": a.delegation_level,
+            }
+            for a in info.ancestry
+        ],
+        "subtree_summary": {
+            "direct_child_count": info.subtree_summary.direct_child_count,
+            "descendant_count": info.subtree_summary.descendant_count,
+            "max_depth": info.subtree_summary.max_depth,
+            "subtree_input_tokens": info.subtree_summary.subtree_input_tokens,
+            "subtree_output_tokens": info.subtree_summary.subtree_output_tokens,
+            "subtree_cost_usd": info.subtree_summary.subtree_cost_usd,
+            "unknown_cost_count": info.subtree_summary.unknown_cost_count,
+            "status_counts": info.subtree_summary.status_counts,
+        },
+        "ancestry_complete": info.ancestry_complete,
+    }
 
 
 def create_dashboard_api(state_store: StateStore) -> FastAPI:
@@ -124,12 +170,21 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
         """Get the full normalized timeline for a single run.
 
         This is the "money endpoint" — everything the run detail
-        page needs in one request.
+        page needs in one request, including the delegation block.
         """
         timeline = await normalize_timeline(run_id, state_store)
         if timeline is None:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
-        return timeline_to_dict(timeline)
+        result = timeline_to_dict(timeline)
+
+        # Delegation block — always present since timeline check
+        # already verified the run exists. The else is defensive.
+        delegation_info = await state_store.get_delegation_info(run_id)
+        result["delegation"] = (
+            _delegation_to_dict(delegation_info) if delegation_info else None
+        )
+
+        return result
 
     @app.get("/api/runs/{run_id}/events")
     async def get_run_events(run_id: str) -> dict[str, Any]:

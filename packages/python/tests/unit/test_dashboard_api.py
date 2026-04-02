@@ -9,6 +9,12 @@ from typing import Any
 from httpx import ASGITransport, AsyncClient
 
 from dendrux.dashboard.api import create_dashboard_api
+from dendrux.runtime.state import (
+    DelegationInfo,
+    ParentRef,
+    RunBrief,
+    SubtreeSummary,
+)
 
 # ------------------------------------------------------------------
 # Mock store for API tests
@@ -133,6 +139,110 @@ class DashboardMockStore:
         if status:
             runs = [r for r in runs if r.status == status]
         return runs[:limit]
+
+    async def get_delegation_info(self, run_id: str) -> DelegationInfo | None:
+        """In-memory delegation info — mirrors SQLAlchemy logic."""
+        run = await self.get_run(run_id)
+        if run is None:
+            return None
+
+        runs_by_id = {r.id: r for r in self._runs}
+
+        # Parent
+        parent: ParentRef | None = None
+        if run.parent_run_id:
+            p = runs_by_id.get(run.parent_run_id)
+            if p is not None:
+                parent = ParentRef(
+                    run_id=p.id, resolved=True,
+                    agent_name=p.agent_name, status=p.status,
+                    delegation_level=p.delegation_level,
+                )
+            else:
+                parent = ParentRef(run_id=run.parent_run_id, resolved=False)
+
+        # Ancestry (walk up)
+        ancestry: list[RunBrief] = []
+        ancestry_complete = True
+        cur = run.parent_run_id
+        visited: set[str] = {run_id}
+        while cur and cur not in visited:
+            visited.add(cur)
+            a = runs_by_id.get(cur)
+            if a is None:
+                ancestry_complete = False
+                break
+            ancestry.append(RunBrief(
+                run_id=a.id, agent_name=a.agent_name,
+                status=a.status, delegation_level=a.delegation_level,
+            ))
+            cur = a.parent_run_id
+        if cur and cur in visited:
+            ancestry_complete = False
+        ancestry.reverse()
+
+        # Direct children
+        children = [
+            RunBrief(
+                run_id=c.id, agent_name=c.agent_name,
+                status=c.status, delegation_level=c.delegation_level,
+            )
+            for c in self._runs
+            if c.parent_run_id == run_id
+        ]
+
+        # Subtree (BFS downward, with cycle guard)
+        queue = [run_id]
+        subtree_runs: list[_Run] = []
+        max_depth = 0
+        depth_map = {run_id: 0}
+        seen: set[str] = {run_id}
+        while queue:
+            nid = queue.pop(0)
+            r = runs_by_id.get(nid)
+            if r is not None:
+                subtree_runs.append(r)
+                for c in self._runs:
+                    if c.parent_run_id == nid and c.id not in seen:
+                        seen.add(c.id)
+                        d = depth_map[nid] + 1
+                        depth_map[c.id] = d
+                        if d > max_depth:
+                            max_depth = d
+                        queue.append(c.id)
+
+        status_counts: dict[str, int] = {}
+        total_in = 0
+        total_out = 0
+        total_cost = 0.0
+        has_cost = False
+        unknown_cost_count = 0
+        for sr in subtree_runs:
+            total_in += sr.total_input_tokens
+            total_out += sr.total_output_tokens
+            if sr.total_cost_usd is not None:
+                total_cost += sr.total_cost_usd
+                has_cost = True
+            else:
+                unknown_cost_count += 1
+            status_counts[sr.status] = status_counts.get(sr.status, 0) + 1
+
+        return DelegationInfo(
+            parent=parent,
+            children=children,
+            ancestry=ancestry,
+            subtree_summary=SubtreeSummary(
+                direct_child_count=len(children),
+                descendant_count=len(subtree_runs) - 1,
+                max_depth=max_depth,
+                subtree_input_tokens=total_in,
+                subtree_output_tokens=total_out,
+                subtree_cost_usd=total_cost if has_cost else None,
+                unknown_cost_count=unknown_cost_count,
+                status_counts=status_counts,
+            ),
+            ancestry_complete=ancestry_complete,
+        )
 
 
 # ------------------------------------------------------------------
@@ -455,3 +565,320 @@ class TestLLMCallsEndpoint:
             resp = await client.get("/api/runs/r1/llm-calls")
             assert resp.status_code == 200
             assert resp.json()["llm_calls"] == []
+
+
+# ------------------------------------------------------------------
+# Delegation block on run detail (Post-Sprint 4)
+# ------------------------------------------------------------------
+
+
+class TestDelegationBlock:
+    """Tests for the delegation block on GET /api/runs/{run_id}."""
+
+    async def test_root_run_has_delegation_block(self) -> None:
+        """A root run with no children still gets a delegation block."""
+        store = DashboardMockStore(
+            _runs=[_Run(id="r1", agent_name="Root", status="success",
+                        total_input_tokens=100, total_output_tokens=50,
+                        total_cost_usd=0.01)],
+            _events={"r1": [
+                _Event(id="e0", event_type="run.started", sequence_index=0,
+                       data={"agent_name": "Root"}),
+                _Event(id="e1", event_type="run.completed", sequence_index=1,
+                       data={"status": "success"}),
+            ]},
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/r1")
+            assert resp.status_code == 200
+            d = resp.json()["delegation"]
+            assert d is not None
+            assert d["parent"] is None
+            assert d["children"] == []
+            assert d["ancestry"] == []
+            assert d["ancestry_complete"] is True
+            # Subtree = self only
+            ss = d["subtree_summary"]
+            assert ss["direct_child_count"] == 0
+            assert ss["descendant_count"] == 0
+            assert ss["max_depth"] == 0
+            assert ss["subtree_input_tokens"] == 100
+            assert ss["subtree_output_tokens"] == 50
+            assert ss["subtree_cost_usd"] == 0.01
+            assert ss["status_counts"] == {"success": 1}
+
+    async def test_parent_child_delegation(self) -> None:
+        """Child run shows resolved parent; parent shows child in children list."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="root", agent_name="Orchestrator", status="success",
+                     total_input_tokens=200, total_output_tokens=100,
+                     total_cost_usd=0.02),
+                _Run(id="child1", agent_name="Worker", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=300, total_output_tokens=150,
+                     total_cost_usd=0.03),
+            ],
+            _events={
+                "root": [
+                    _Event(id="e0", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "Orchestrator"}),
+                    _Event(id="e1", event_type="run.completed", sequence_index=1,
+                           data={"status": "success"}),
+                ],
+                "child1": [
+                    _Event(id="e2", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "Worker"}),
+                    _Event(id="e3", event_type="run.completed", sequence_index=1,
+                           data={"status": "success"}),
+                ],
+            },
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # Check parent (root) detail
+            resp = await client.get("/api/runs/root")
+            d = resp.json()["delegation"]
+            assert d["parent"] is None
+            assert len(d["children"]) == 1
+            assert d["children"][0]["run_id"] == "child1"
+            assert d["children"][0]["agent_name"] == "Worker"
+            ss = d["subtree_summary"]
+            assert ss["direct_child_count"] == 1
+            assert ss["descendant_count"] == 1
+            assert ss["max_depth"] == 1
+            assert ss["subtree_input_tokens"] == 500  # 200 + 300
+            assert ss["subtree_output_tokens"] == 250  # 100 + 150
+            assert ss["subtree_cost_usd"] == 0.05  # 0.02 + 0.03
+
+            # Check child detail
+            resp = await client.get("/api/runs/child1")
+            d = resp.json()["delegation"]
+            assert d["parent"]["run_id"] == "root"
+            assert d["parent"]["resolved"] is True
+            assert d["parent"]["agent_name"] == "Orchestrator"
+            assert d["ancestry"] == [
+                {"run_id": "root", "agent_name": "Orchestrator",
+                 "status": "success", "delegation_level": 0},
+            ]
+            assert d["ancestry_complete"] is True
+            assert d["children"] == []
+
+    async def test_broken_parent_chain(self) -> None:
+        """Parent run_id exists but parent row is missing."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="orphan", agent_name="Worker", status="success",
+                     parent_run_id="missing_parent", delegation_level=1,
+                     total_input_tokens=100, total_output_tokens=50),
+            ],
+            _events={"orphan": [
+                _Event(id="e0", event_type="run.started", sequence_index=0,
+                       data={"agent_name": "Worker"}),
+                _Event(id="e1", event_type="run.completed", sequence_index=1,
+                       data={"status": "success"}),
+            ]},
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/orphan")
+            d = resp.json()["delegation"]
+            # Parent is unresolved
+            assert d["parent"]["run_id"] == "missing_parent"
+            assert d["parent"]["resolved"] is False
+            assert d["parent"]["agent_name"] is None
+            # Ancestry is incomplete
+            assert d["ancestry"] == []
+            assert d["ancestry_complete"] is False
+
+    async def test_deep_tree_subtree_summary(self) -> None:
+        """Three-level tree: root → child → grandchild."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="root", agent_name="Orch", status="success",
+                     total_input_tokens=100, total_output_tokens=50,
+                     total_cost_usd=0.01),
+                _Run(id="mid", agent_name="Research", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=200, total_output_tokens=100,
+                     total_cost_usd=0.02),
+                _Run(id="leaf", agent_name="Fact", status="error",
+                     parent_run_id="mid", delegation_level=2,
+                     total_input_tokens=50, total_output_tokens=25,
+                     total_cost_usd=0.005),
+            ],
+            _events={
+                "root": [
+                    _Event(id="e0", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "Orch"}),
+                    _Event(id="e1", event_type="run.completed", sequence_index=1,
+                           data={"status": "success"}),
+                ],
+                "mid": [
+                    _Event(id="e2", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "Research"}),
+                    _Event(id="e3", event_type="run.completed", sequence_index=1,
+                           data={"status": "success"}),
+                ],
+                "leaf": [
+                    _Event(id="e4", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "Fact"}),
+                    _Event(id="e5", event_type="run.completed", sequence_index=1,
+                           data={"status": "error"}),
+                ],
+            },
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # Root sees full tree
+            resp = await client.get("/api/runs/root")
+            ss = resp.json()["delegation"]["subtree_summary"]
+            assert ss["descendant_count"] == 2
+            assert ss["max_depth"] == 2
+            assert ss["subtree_input_tokens"] == 350  # 100+200+50
+            assert ss["status_counts"] == {"success": 2, "error": 1}
+
+            # Middle node sees itself + leaf
+            resp = await client.get("/api/runs/mid")
+            d = resp.json()["delegation"]
+            assert d["parent"]["run_id"] == "root"
+            assert d["parent"]["resolved"] is True
+            assert len(d["ancestry"]) == 1
+            assert d["ancestry"][0]["run_id"] == "root"
+            ss = d["subtree_summary"]
+            assert ss["descendant_count"] == 1
+            assert ss["max_depth"] == 1
+            assert ss["direct_child_count"] == 1
+
+            # Leaf has ancestry [root, mid]
+            resp = await client.get("/api/runs/leaf")
+            d = resp.json()["delegation"]
+            assert len(d["ancestry"]) == 2
+            assert d["ancestry"][0]["run_id"] == "root"
+            assert d["ancestry"][1]["run_id"] == "mid"
+            assert d["subtree_summary"]["descendant_count"] == 0
+
+    async def test_multiple_children_status_counts(self) -> None:
+        """Status counts include self + all descendants."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="root", agent_name="Orch", status="success",
+                     total_input_tokens=100, total_output_tokens=50),
+                _Run(id="c1", agent_name="W1", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=50, total_output_tokens=25),
+                _Run(id="c2", agent_name="W2", status="error",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=60, total_output_tokens=30),
+                _Run(id="c3", agent_name="W3", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=70, total_output_tokens=35),
+            ],
+            _events={"root": [
+                _Event(id="e0", event_type="run.started", sequence_index=0,
+                       data={"agent_name": "Orch"}),
+                _Event(id="e1", event_type="run.completed", sequence_index=1,
+                       data={"status": "success"}),
+            ]},
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/root")
+            ss = resp.json()["delegation"]["subtree_summary"]
+            assert ss["direct_child_count"] == 3
+            assert ss["descendant_count"] == 3
+            assert ss["status_counts"] == {"success": 3, "error": 1}
+            assert ss["subtree_input_tokens"] == 280  # 100+50+60+70
+
+    async def test_cyclic_parent_chain_marks_incomplete(self) -> None:
+        """A→B→A cycle in parent_run_id sets ancestry_complete=False."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="a", agent_name="A", status="success",
+                     parent_run_id="b", delegation_level=1),
+                _Run(id="b", agent_name="B", status="success",
+                     parent_run_id="a", delegation_level=1),
+            ],
+            _events={
+                "a": [
+                    _Event(id="e0", event_type="run.started", sequence_index=0,
+                           data={"agent_name": "A"}),
+                    _Event(id="e1", event_type="run.completed", sequence_index=1,
+                           data={"status": "success"}),
+                ],
+            },
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/a")
+            d = resp.json()["delegation"]
+            # Cycle detected — ancestry is incomplete
+            assert d["ancestry_complete"] is False
+            # B was walked, then its parent (a) is in visited → stop
+            assert len(d["ancestry"]) == 1
+            assert d["ancestry"][0]["run_id"] == "b"
+
+    async def test_mixed_null_cost_tracks_unknown_count(self) -> None:
+        """Subtree with some known and some unknown costs."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="root", agent_name="Orch", status="success",
+                     total_input_tokens=100, total_output_tokens=50,
+                     total_cost_usd=0.01),
+                _Run(id="c1", agent_name="W1", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=200, total_output_tokens=100,
+                     total_cost_usd=None),  # Unknown cost
+                _Run(id="c2", agent_name="W2", status="success",
+                     parent_run_id="root", delegation_level=1,
+                     total_input_tokens=300, total_output_tokens=150,
+                     total_cost_usd=0.03),
+            ],
+            _events={"root": [
+                _Event(id="e0", event_type="run.started", sequence_index=0,
+                       data={"agent_name": "Orch"}),
+                _Event(id="e1", event_type="run.completed", sequence_index=1,
+                       data={"status": "success"}),
+            ]},
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/root")
+            ss = resp.json()["delegation"]["subtree_summary"]
+            # Cost only includes root (0.01) + c2 (0.03) = 0.04
+            assert ss["subtree_cost_usd"] == 0.04
+            # c1 has unknown cost
+            assert ss["unknown_cost_count"] == 1
+            # Tokens still sum everything
+            assert ss["subtree_input_tokens"] == 600  # 100+200+300
+
+    async def test_all_unknown_cost(self) -> None:
+        """When no runs have cost, subtree_cost_usd is None."""
+        store = DashboardMockStore(
+            _runs=[
+                _Run(id="root", agent_name="Orch", status="success",
+                     total_input_tokens=100, total_output_tokens=50,
+                     total_cost_usd=None),
+            ],
+            _events={"root": [
+                _Event(id="e0", event_type="run.started", sequence_index=0,
+                       data={"agent_name": "Orch"}),
+                _Event(id="e1", event_type="run.completed", sequence_index=1,
+                       data={"status": "success"}),
+            ]},
+        )
+        app = create_dashboard_api(store)  # type: ignore[arg-type]
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/runs/root")
+            ss = resp.json()["delegation"]["subtree_summary"]
+            assert ss["subtree_cost_usd"] is None
+            assert ss["unknown_cost_count"] == 1

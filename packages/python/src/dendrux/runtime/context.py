@@ -27,6 +27,30 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class DelegationDepthExceededError(RuntimeError):
+    """Raised when a child run would exceed max_delegation_depth.
+
+    Attributes:
+        delegation_level: The level the child would have been at.
+        max_depth: The configured maximum depth.
+    """
+
+    def __init__(self, delegation_level: int, max_depth: int) -> None:
+        self.delegation_level = delegation_level
+        self.max_depth = max_depth
+        super().__init__(
+            f"Delegation depth {delegation_level} exceeds "
+            f"max_delegation_depth={max_depth}. "
+            f"Increase the limit or restructure the agent tree."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Context dataclass
 # ---------------------------------------------------------------------------
@@ -43,6 +67,8 @@ class DelegationContext:
         store_identity: Comparable identity for the state store (database URL
             for SQLAlchemy stores, str(id()) for custom stores). None if not
             persisted.
+        max_delegation_depth: Inherited ceiling on delegation depth.
+            None means unbounded.
         warned_mismatches: Mismatch types already warned about for this
             parent run. Used to deduplicate warnings when an orchestrator
             fans out to many child runs. Mutable set on a frozen dataclass —
@@ -53,6 +79,7 @@ class DelegationContext:
     delegation_level: int = 0
     persisted: bool = False
     store_identity: str | None = None
+    max_delegation_depth: int | None = None
     warned_mismatches: set[str] = field(default_factory=set)
 
     def __hash__(self) -> int:
@@ -122,12 +149,21 @@ def resolve_parent_link(
     Returns:
         (parent_run_id, delegation_level) to pass to create_run().
         parent_run_id is None when linking is not safe.
+
+    Raises:
+        DelegationDepthExceededError: If the child's delegation level would
+            exceed the inherited max_delegation_depth.
     """
     if parent_ctx is None:
         # Root run — no parent
         return None, 0
 
     delegation_level = parent_ctx.delegation_level + 1
+
+    # Depth guard — check before doing anything else
+    max_depth = parent_ctx.max_delegation_depth
+    if max_depth is not None and delegation_level > max_depth:
+        raise DelegationDepthExceededError(delegation_level, max_depth)
 
     if child_store is None:
         # Child is ephemeral — no DB row, no linking needed

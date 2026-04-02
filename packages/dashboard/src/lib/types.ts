@@ -142,6 +142,42 @@ export interface LLMCallsResponse {
   llm_calls: LLMInteraction[];
 }
 
+// -- Delegation types --
+
+export interface ParentRef {
+  run_id: string;
+  resolved: boolean;
+  agent_name: string | null;
+  status: string | null;
+  delegation_level: number | null;
+}
+
+export interface RunBrief {
+  run_id: string;
+  agent_name: string;
+  status: string;
+  delegation_level: number;
+}
+
+export interface SubtreeSummary {
+  direct_child_count: number;
+  descendant_count: number;
+  max_depth: number;
+  subtree_input_tokens: number;
+  subtree_output_tokens: number;
+  subtree_cost_usd: number | null;
+  unknown_cost_count: number;
+  status_counts: Record<string, number>;
+}
+
+export interface DelegationInfo {
+  parent: ParentRef | null;
+  children: RunBrief[];
+  ancestry: RunBrief[];
+  subtree_summary: SubtreeSummary;
+  ancestry_complete: boolean;
+}
+
 // -- API response shapes --
 
 export interface RunDetailResponse {
@@ -149,6 +185,7 @@ export interface RunDetailResponse {
   nodes: TimelineNode[];
   system_prompt: string | null;
   messages_by_iteration: Record<string, TraceMessage[]>;
+  delegation: DelegationInfo | null;
 }
 
 export interface RunListItem {

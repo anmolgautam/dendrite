@@ -46,6 +46,17 @@ MAX_ITERATIONS_CEILING = 200
 _UNSET: Any = object()
 
 
+def _validate_max_delegation_depth(value: Any) -> None:
+    """Validate max_delegation_depth — shared between constructor and _validate()."""
+    if value is _UNSET:
+        return
+    if value is not None and (not isinstance(value, int) or value < 0):
+        raise ValueError(
+            f"max_delegation_depth must be a non-negative integer or None, "
+            f"got {value!r}"
+        )
+
+
 class Agent:
     """Dendrux agent — definition and runtime facade.
 
@@ -64,6 +75,7 @@ class Agent:
     prompt: str = ""
     tools: list[Callable[..., Any]] = []
     max_iterations: int = 10
+    max_delegation_depth: int | None = _UNSET
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -84,6 +96,7 @@ class Agent:
         prompt: str = _UNSET,
         tools: list[Callable[..., Any]] = _UNSET,
         max_iterations: int = _UNSET,
+        max_delegation_depth: int | None = _UNSET,
         loop: Loop | None = None,
         provider: LLMProvider = _UNSET,
         database_url: str | None = None,
@@ -115,6 +128,9 @@ class Agent:
             self.tools = list(self.__class__.tools)
         if max_iterations is not _UNSET:
             self.max_iterations = max_iterations
+        if max_delegation_depth is not _UNSET:
+            _validate_max_delegation_depth(max_delegation_depth)
+            self.max_delegation_depth = max_delegation_depth
 
         # --- Loop ---
         self._loop: Loop | None = loop
@@ -171,6 +187,9 @@ class Agent:
                 f"Agent '{self.name}' requires a prompt. "
                 f"Set prompt as a class attribute or pass it to the constructor."
             )
+
+        # Validate max_delegation_depth (catches subclass defaults like -1)
+        _validate_max_delegation_depth(self.max_delegation_depth)
 
         # SingleCall cannot have tools
         from dendrux.loops.single import SingleCall
@@ -287,6 +306,7 @@ class Agent:
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         observer: Any | None = None,
+        max_delegation_depth: int | None = _UNSET,
         **kwargs: Any,
     ) -> RunResult:
         """Start a new agent run.
@@ -301,6 +321,9 @@ class Agent:
             observer: Optional observer for lifecycle events (e.g. ConsoleObserver
                 for terminal output, custom observers for Slack/Telegram/etc.).
                 Composed with PersistenceObserver internally if persistence is enabled.
+            max_delegation_depth: Maximum allowed delegation depth for the run
+                tree. Default 10. None means unbounded. Child runs inherit
+                this limit automatically.
             **kwargs: Forwarded to the LLM provider (temperature, max_tokens, etc.).
 
         Returns:
@@ -308,13 +331,23 @@ class Agent:
 
         Raises:
             ValueError: If no provider is configured.
+            DelegationDepthExceededError: If this run would exceed the inherited
+                max_delegation_depth from a parent run.
         """
+        _validate_max_delegation_depth(max_delegation_depth)
         if self._provider is None:
             raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
 
         store = await self._resolve_state_store()
 
         from dendrux.runtime.runner import run as runner_run
+
+        # Resolve depth: explicit run kwarg → agent default → let runner decide
+        run_kwargs: dict[str, Any] = {}
+        if max_delegation_depth is not _UNSET:
+            run_kwargs["max_delegation_depth"] = max_delegation_depth
+        elif self.max_delegation_depth is not _UNSET:
+            run_kwargs["max_delegation_depth"] = self.max_delegation_depth
 
         return await runner_run(
             self,
@@ -325,6 +358,7 @@ class Agent:
             metadata=metadata,
             redact=self._redact,
             extra_observer=observer,
+            **run_kwargs,
             **kwargs,
         )
 
@@ -405,6 +439,7 @@ class Agent:
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         observer: Any | None = None,
+        max_delegation_depth: int | None = _UNSET,
         **kwargs: Any,
     ) -> RunStream:
         """Stream an agent run as RunEvents.
@@ -436,6 +471,8 @@ class Agent:
             tenant_id: Optional tenant ID for multi-tenant isolation.
             metadata: Optional developer linking data (thread_id, user_id, etc.).
             observer: Optional observer for lifecycle events.
+            max_delegation_depth: Maximum allowed delegation depth for the run
+                tree. Default 10. None means unbounded.
             **kwargs: Forwarded to the LLM provider (temperature, max_tokens, etc.).
 
         Returns:
@@ -444,10 +481,18 @@ class Agent:
         Raises:
             ValueError: If no provider is configured.
         """
+        _validate_max_delegation_depth(max_delegation_depth)
         if self._provider is None:
             raise ValueError("Agent requires a provider. Pass provider= to the constructor.")
 
         from dendrux.runtime.runner import run_stream as runner_run_stream
+
+        # Resolve depth: explicit run kwarg → agent default → let runner decide
+        stream_kwargs: dict[str, Any] = {}
+        if max_delegation_depth is not _UNSET:
+            stream_kwargs["max_delegation_depth"] = max_delegation_depth
+        elif self.max_delegation_depth is not _UNSET:
+            stream_kwargs["max_delegation_depth"] = self.max_delegation_depth
 
         return runner_run_stream(
             self,
@@ -458,6 +503,7 @@ class Agent:
             metadata=metadata,
             redact=self._redact,
             extra_observer=observer,
+            **stream_kwargs,
             **kwargs,
         )
 

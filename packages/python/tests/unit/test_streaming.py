@@ -551,6 +551,7 @@ class _FakeRunRecord:
         self.agent_name = "Agent"
         self.status = "running"
         self.delegation_level = delegation_level
+        self.meta: dict[str, Any] | None = None
 
 
 class ResumeStateStore:

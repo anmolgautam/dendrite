@@ -92,6 +92,9 @@ async def _emit_event(
         logger.warning("Failed to record event %s for run %s", event_type, run_id, exc_info=True)
 
 
+_UNSET_DEPTH: Any = object()
+
+
 async def run(
     agent: Agent,
     *,
@@ -104,6 +107,7 @@ async def run(
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
     extra_observer: Any | None = None,
+    max_delegation_depth: int | None = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunResult:
     """Run an agent to completion.
@@ -126,6 +130,10 @@ async def run(
         redact: Optional string scrubber applied to all persisted content
             (trace text, tool params, result payloads, error messages).
             Receives a plain string, must return a plain string.
+        max_delegation_depth: Maximum allowed delegation depth for the
+            run tree. Default 10. None means unbounded. Propagated to
+            all child runs via contextvar. Raises DelegationDepthExceededError
+            if a child run would exceed this depth.
         **kwargs: Reserved for future use.
 
     Returns:
@@ -148,6 +156,17 @@ async def run(
         result = await run(agent, provider=provider, user_input="What is 15 + 27?")
         print(result.answer)
     """
+    # Validate max_delegation_depth early — before any side effects.
+    if (
+        max_delegation_depth is not _UNSET_DEPTH
+        and max_delegation_depth is not None
+        and (not isinstance(max_delegation_depth, int) or max_delegation_depth < 0)
+    ):
+        raise ValueError(
+            f"max_delegation_depth must be a non-negative integer or None, "
+            f"got {max_delegation_depth!r}"
+        )
+
     resolved_strategy = strategy or NativeToolCalling()
     resolved_loop = loop or agent.loop or ReActLoop()
 
@@ -166,13 +185,57 @@ async def run(
     parent_ctx = get_delegation_context()
     parent_run_id, delegation_level = resolve_parent_link(parent_ctx, state_store)
 
+    # Resolve max_delegation_depth early — needed both for metadata and context.
+    #   1. Explicit kwarg → use it (even None, meaning unbounded)
+    #   2. Inherit from parent context (if child run)
+    #   3. Default 10 (root run without explicit kwarg)
+    if max_delegation_depth is not _UNSET_DEPTH:
+        effective_max_depth = max_delegation_depth
+    elif parent_ctx is not None:
+        effective_max_depth = parent_ctx.max_delegation_depth
+    else:
+        effective_max_depth = 10
+
+    # Tighten-only: child can never loosen the parent's limit.
+    # Warn only when an explicit child value would be loosened (not on silent inherit).
+    # Deduplicated per parent run via warned_mismatches set.
+    if parent_ctx is not None and parent_ctx.max_delegation_depth is not None:
+        parent_limit = parent_ctx.max_delegation_depth
+        if effective_max_depth is None:
+            if (
+                max_delegation_depth is not _UNSET_DEPTH
+                and "depth_clamped" not in parent_ctx.warned_mismatches
+            ):
+                logger.warning(
+                    "max_delegation_depth=None (unbounded) clamped to %d "
+                    "(inherited parent limit)",
+                    parent_limit,
+                )
+                parent_ctx.warned_mismatches.add("depth_clamped")
+            effective_max_depth = parent_limit
+        elif effective_max_depth > parent_limit:
+            if (
+                max_delegation_depth is not _UNSET_DEPTH
+                and "depth_clamped" not in parent_ctx.warned_mismatches
+            ):
+                logger.warning(
+                    "max_delegation_depth=%d clamped to %d "
+                    "(inherited parent limit)",
+                    effective_max_depth,
+                    parent_limit,
+                )
+                parent_ctx.warned_mismatches.add("depth_clamped")
+            effective_max_depth = parent_limit
+
     if state_store is not None:
         # Create the run record before the loop starts
         # Apply redaction to user input before persistence
         redacted_input = redact(user_input) if redact else user_input
-        # Merge loop type into developer metadata for dashboard/debugging
+        # Merge loop type + depth limit into developer metadata
         run_meta = dict(metadata) if metadata else {}
         run_meta["dendrux.loop"] = type(resolved_loop).__name__
+        if effective_max_depth is not None:
+            run_meta["dendrux.max_delegation_depth"] = effective_max_depth
         await state_store.create_run(
             run_id,
             agent.name,
@@ -228,6 +291,7 @@ async def run(
         delegation_level=delegation_level,
         persisted=state_store is not None,
         store_identity=get_store_identity(state_store),
+        max_delegation_depth=effective_max_depth,
     )
     ctx_token = set_delegation_context(this_ctx)
 
@@ -336,6 +400,7 @@ def run_stream(
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
     extra_observer: Any | None = None,
+    max_delegation_depth: int | None = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunStream:
     """Stream an agent run as RunEvents, returning a RunStream.
@@ -356,6 +421,17 @@ def run_stream(
         intermediate events (TEXT_DELTA, TOOL_USE_*, TOOL_RESULT).
       - Runner persists loop outcomes before forwarding them.
     """
+    # Validate max_delegation_depth early — synchronous, before generator.
+    if (
+        max_delegation_depth is not _UNSET_DEPTH
+        and max_delegation_depth is not None
+        and (not isinstance(max_delegation_depth, int) or max_delegation_depth < 0)
+    ):
+        raise ValueError(
+            f"max_delegation_depth must be a non-negative integer or None, "
+            f"got {max_delegation_depth!r}"
+        )
+
     from dendrux.types import RunEvent, RunResult
     from dendrux.types import RunStream as _RunStream
 
@@ -392,12 +468,52 @@ def run_stream(
             parent_ctx = get_delegation_context()
             parent_run_id, delegation_level = resolve_parent_link(parent_ctx, store)
 
+            # Resolve depth early — persisted in metadata for resume
+            if max_delegation_depth is not _UNSET_DEPTH:
+                eff_max_depth = max_delegation_depth
+            elif parent_ctx is not None:
+                eff_max_depth = parent_ctx.max_delegation_depth
+            else:
+                eff_max_depth = 10
+
+            # Tighten-only: child can never loosen the parent's limit.
+            # Deduplicated per parent run via warned_mismatches set.
+            if parent_ctx is not None and parent_ctx.max_delegation_depth is not None:
+                parent_limit = parent_ctx.max_delegation_depth
+                if eff_max_depth is None:
+                    if (
+                        max_delegation_depth is not _UNSET_DEPTH
+                        and "depth_clamped" not in parent_ctx.warned_mismatches
+                    ):
+                        logger.warning(
+                            "max_delegation_depth=None (unbounded) clamped to %d "
+                            "(inherited parent limit)",
+                            parent_limit,
+                        )
+                        parent_ctx.warned_mismatches.add("depth_clamped")
+                    eff_max_depth = parent_limit
+                elif eff_max_depth > parent_limit:
+                    if (
+                        max_delegation_depth is not _UNSET_DEPTH
+                        and "depth_clamped" not in parent_ctx.warned_mismatches
+                    ):
+                        logger.warning(
+                            "max_delegation_depth=%d clamped to %d "
+                            "(inherited parent limit)",
+                            eff_max_depth,
+                            parent_limit,
+                        )
+                        parent_ctx.warned_mismatches.add("depth_clamped")
+                    eff_max_depth = parent_limit
+
             observer = None
 
             if store is not None:
                 redacted_input = redact(user_input) if redact else user_input
                 run_meta = dict(metadata) if metadata else {}
                 run_meta["dendrux.loop"] = type(resolved_loop).__name__
+                if eff_max_depth is not None:
+                    run_meta["dendrux.max_delegation_depth"] = eff_max_depth
                 await store.create_run(
                     run_id,
                     agent.name,
@@ -442,6 +558,7 @@ def run_stream(
                 delegation_level=delegation_level,
                 persisted=store is not None,
                 store_identity=get_store_identity(store),
+                max_delegation_depth=eff_max_depth,
             )
             ctx_token = set_delegation_context(this_ctx)
 
@@ -893,13 +1010,21 @@ async def _resume_core(
 
     # 9. Set delegation context — resumed run is the active parent for any
     #    nested agent.run() calls spawned during this resume cycle.
+    #    Read max_delegation_depth from persisted metadata so the depth
+    #    guard survives pause/resume cycles.
     run_record = await state_store.get_run(run_id)
     resume_delegation_level = run_record.delegation_level if run_record else 0
+    resume_max_depth: int | None = None
+    if run_record and run_record.meta:
+        raw = run_record.meta.get("dendrux.max_delegation_depth")
+        if isinstance(raw, int):
+            resume_max_depth = raw
     resume_ctx = DelegationContext(
         run_id=run_id,
         delegation_level=resume_delegation_level,
         persisted=True,
         store_identity=get_store_identity(state_store),
+        max_delegation_depth=resume_max_depth,
     )
     ctx_token = set_delegation_context(resume_ctx)
 
@@ -1081,14 +1206,22 @@ def resume_stream(
             )
             _shared["sequencer"] = ctx.sequencer
 
-            # 6. Set delegation context for the generator lifetime
+            # 6. Set delegation context for the generator lifetime.
+            #    Read max_delegation_depth from persisted metadata so the
+            #    depth guard survives pause/resume cycles.
             run_record = await store.get_run(run_id)
             resume_level = run_record.delegation_level if run_record else 0
+            resume_max_depth: int | None = None
+            if run_record and run_record.meta:
+                raw = run_record.meta.get("dendrux.max_delegation_depth")
+                if isinstance(raw, int):
+                    resume_max_depth = raw
             resume_ctx = DelegationContext(
                 run_id=run_id,
                 delegation_level=resume_level,
                 persisted=True,
                 store_identity=get_store_identity(store),
+                max_delegation_depth=resume_max_depth,
             )
             ctx_token = set_delegation_context(resume_ctx)
 

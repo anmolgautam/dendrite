@@ -961,3 +961,241 @@ class TestLLMInteractions:
                 select(LLMInteraction).where(LLMInteraction.agent_run_id == "run_llm_cas")
             )
             assert result.scalars().all() == []
+
+
+# ------------------------------------------------------------------
+# Delegation queries (get_delegation_info)
+# ------------------------------------------------------------------
+
+
+class TestDelegationInfo:
+    """Integration tests for get_delegation_info against real SQLite."""
+
+    async def _create_finalized_run(
+        self,
+        store,
+        run_id: str,
+        agent_name: str,
+        *,
+        parent_run_id: str | None = None,
+        delegation_level: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float | None = None,
+        status: str = "success",
+    ) -> None:
+        """Helper: create a run and finalize it with tokens/cost."""
+        await store.create_run(
+            run_id,
+            agent_name,
+            parent_run_id=parent_run_id,
+            delegation_level=delegation_level,
+        )
+        usage = UsageStats(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+        )
+        await store.finalize_run(
+            run_id, status=status, iteration_count=1, total_usage=usage,
+        )
+
+    async def test_nonexistent_run_returns_none(self, store) -> None:
+        result = await store.get_delegation_info("nonexistent")
+        assert result is None
+
+    async def test_solo_root_run(self, store) -> None:
+        """A root run with no children or parent."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+        )
+
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        assert info.parent is None
+        assert info.children == []
+        assert info.ancestry == []
+        assert info.ancestry_complete is True
+        ss = info.subtree_summary
+        assert ss.direct_child_count == 0
+        assert ss.descendant_count == 0
+        assert ss.max_depth == 0
+        assert ss.subtree_input_tokens == 100
+        assert ss.subtree_output_tokens == 50
+        assert ss.subtree_cost_usd == pytest.approx(0.01)
+        assert ss.unknown_cost_count == 0
+        assert ss.status_counts == {"success": 1}
+
+    async def test_parent_child_tree(self, store) -> None:
+        """Two-level tree: root → child."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=200, output_tokens=100, cost_usd=0.02,
+        )
+        await self._create_finalized_run(
+            store, "child", "Worker",
+            parent_run_id="root", delegation_level=1,
+            input_tokens=300, output_tokens=150, cost_usd=0.03,
+        )
+
+        # Root perspective
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        assert info.parent is None
+        assert len(info.children) == 1
+        assert info.children[0].run_id == "child"
+        ss = info.subtree_summary
+        assert ss.direct_child_count == 1
+        assert ss.descendant_count == 1
+        assert ss.max_depth == 1
+        assert ss.subtree_input_tokens == 500
+        assert ss.subtree_cost_usd == pytest.approx(0.05)
+
+        # Child perspective
+        info = await store.get_delegation_info("child")
+        assert info is not None
+        assert info.parent is not None
+        assert info.parent.run_id == "root"
+        assert info.parent.resolved is True
+        assert info.parent.agent_name == "Orch"
+        assert len(info.ancestry) == 1
+        assert info.ancestry[0].run_id == "root"
+        assert info.ancestry_complete is True
+        assert info.children == []
+
+    async def test_three_level_deep_tree(self, store) -> None:
+        """root → mid → leaf — verifies depth, ancestry, and subtree rollup."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+        )
+        await self._create_finalized_run(
+            store, "mid", "Research",
+            parent_run_id="root", delegation_level=1,
+            input_tokens=200, output_tokens=100, cost_usd=0.02,
+        )
+        await self._create_finalized_run(
+            store, "leaf", "Fact",
+            parent_run_id="mid", delegation_level=2,
+            input_tokens=50, output_tokens=25, cost_usd=0.005, status="error",
+        )
+
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        ss = info.subtree_summary
+        assert ss.descendant_count == 2
+        assert ss.max_depth == 2
+        assert ss.subtree_input_tokens == 350
+        assert ss.status_counts == {"success": 2, "error": 1}
+
+        # Leaf sees full ancestry
+        info = await store.get_delegation_info("leaf")
+        assert info is not None
+        assert len(info.ancestry) == 2
+        assert info.ancestry[0].run_id == "root"
+        assert info.ancestry[1].run_id == "mid"
+        assert info.ancestry_complete is True
+
+    async def test_broken_parent_chain(self, store, session_factory) -> None:
+        """Parent run_id points to a missing row."""
+        # Create orphan without parent first, then corrupt via raw SQL.
+        # Must disable FK temporarily — SQLite enforces FKs on UPDATE too.
+        await store.create_run("orphan", "Worker")
+        await store.finalize_run("orphan", status="success")
+
+        async with session_factory() as session:
+            from sqlalchemy import text
+
+            await session.execute(text("PRAGMA foreign_keys = OFF"))
+            await session.execute(
+                text(
+                    "UPDATE agent_runs SET parent_run_id = 'ghost', "
+                    "delegation_level = 1 WHERE id = 'orphan'"
+                )
+            )
+            await session.commit()
+            await session.execute(text("PRAGMA foreign_keys = ON"))
+
+        info = await store.get_delegation_info("orphan")
+        assert info is not None
+        assert info.parent is not None
+        assert info.parent.run_id == "ghost"
+        assert info.parent.resolved is False
+        assert info.ancestry == []
+        assert info.ancestry_complete is False
+
+    async def test_mixed_known_unknown_cost(self, store) -> None:
+        """Subtree with some known and some NULL costs."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+        )
+        # c1 has no cost
+        await self._create_finalized_run(
+            store, "c1", "W1",
+            parent_run_id="root", delegation_level=1,
+            input_tokens=200, output_tokens=100, cost_usd=None,
+        )
+        # c2 has cost
+        await self._create_finalized_run(
+            store, "c2", "W2",
+            parent_run_id="root", delegation_level=1,
+            input_tokens=300, output_tokens=150, cost_usd=0.03,
+        )
+
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        ss = info.subtree_summary
+        assert ss.subtree_cost_usd == pytest.approx(0.04)  # 0.01 + 0.03
+        assert ss.unknown_cost_count == 1
+        assert ss.subtree_input_tokens == 600
+
+    async def test_all_unknown_cost(self, store) -> None:
+        """When no runs have cost, subtree_cost_usd is None."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=None,
+        )
+
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        assert info.subtree_summary.subtree_cost_usd is None
+        assert info.subtree_summary.unknown_cost_count == 1
+
+    async def test_cyclic_parent_chain(self, store, session_factory) -> None:
+        """A→B→A cycle: ancestry is incomplete, BFS doesn't hang."""
+        # Create A and B normally, then corrupt B's parent to point at A
+        await store.create_run("a", "A")
+        await store.finalize_run("a", status="success")
+        await store.create_run("b", "B", parent_run_id="a", delegation_level=1)
+        await store.finalize_run("b", status="success")
+
+        # Corrupt: set A's parent_run_id to B (creating a cycle)
+        async with session_factory() as session:
+            from sqlalchemy import update
+
+            await session.execute(
+                update(AgentRun).where(AgentRun.id == "a").values(parent_run_id="b")
+            )
+            await session.commit()
+
+        # Should not hang — cycle guard stops ancestry walk
+        info = await store.get_delegation_info("a")
+        assert info is not None
+        assert info.ancestry_complete is False
+
+    async def test_wide_fanout(self, store) -> None:
+        """Root with 5 children — all discovered by BFS."""
+        await self._create_finalized_run(
+            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+        )
+        for i in range(5):
+            await self._create_finalized_run(
+                store, f"c{i}", f"W{i}",
+                parent_run_id="root", delegation_level=1,
+                input_tokens=10, output_tokens=5, cost_usd=0.001,
+            )
+
+        info = await store.get_delegation_info("root")
+        assert info is not None
+        ss = info.subtree_summary
+        assert ss.direct_child_count == 5
+        assert ss.descendant_count == 5
+        assert ss.max_depth == 1
+        assert ss.subtree_input_tokens == 150  # 100 + 5*10

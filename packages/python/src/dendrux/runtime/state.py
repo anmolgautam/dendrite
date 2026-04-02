@@ -50,6 +50,69 @@ class RunRecord:
     updated_at: datetime | None = None
 
 
+# ---------------------------------------------------------------------------
+# Delegation read models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunBrief:
+    """Minimal run reference for delegation payloads."""
+
+    run_id: str
+    agent_name: str
+    status: str
+    delegation_level: int
+
+
+@dataclass
+class ParentRef:
+    """Reference to a parent run — may or may not be resolvable.
+
+    ``resolved=False`` means parent_run_id exists on the run row but the
+    parent row itself is missing (different store, deleted, etc.).
+    ``parent is None`` on DelegationInfo means the run has no parent_run_id.
+    """
+
+    run_id: str
+    resolved: bool
+    agent_name: str | None = None
+    status: str | None = None
+    delegation_level: int | None = None
+
+
+@dataclass
+class SubtreeSummary:
+    """Aggregated metrics for a run and all its descendants.
+
+    All ``subtree_*`` fields and ``status_counts`` include the current run.
+    ``descendant_count`` does not — it counts only runs below this one.
+    """
+
+    direct_child_count: int
+    descendant_count: int
+    max_depth: int
+    subtree_input_tokens: int
+    subtree_output_tokens: int
+    subtree_cost_usd: float | None
+    unknown_cost_count: int
+    status_counts: dict[str, int]
+
+
+@dataclass
+class DelegationInfo:
+    """Complete delegation context for a single run.
+
+    Returned by ``StateStore.get_delegation_info()``.
+    """
+
+    parent: ParentRef | None
+    children: list[RunBrief]
+    ancestry: list[RunBrief]
+    subtree_summary: SubtreeSummary
+    ancestry_complete: bool
+
+
 @dataclass
 class TraceRecord:
     """Lightweight read model for a persisted trace entry."""
@@ -270,6 +333,14 @@ class StateStore(Protocol):
         tenant_id: str | None = None,
         status: str | None = None,
     ) -> list[RunRecord]: ...
+
+    async def get_delegation_info(self, run_id: str) -> DelegationInfo | None:
+        """Get full delegation context for a run.
+
+        Returns parent ref, direct children, ancestry chain, and subtree
+        summary with rolled-up metrics. Returns None if the run doesn't exist.
+        """
+        ...
 
 
 class SQLAlchemyStateStore:
@@ -787,6 +858,168 @@ class SQLAlchemyStateStore:
                 for r in rows
             ]
 
+    # ------------------------------------------------------------------
+    # Delegation queries
+    # ------------------------------------------------------------------
+
+    async def get_delegation_info(self, run_id: str) -> DelegationInfo | None:
+        """Get full delegation context for a run.
+
+        Uses iterative walks in both directions:
+          - Upward: O(depth) single-row queries for ancestry
+          - Downward: O(depth) batched queries for subtree (BFS)
+          - Python-side aggregation for metrics
+
+        Cycle-safe via visited sets. Cross-DB portable (no recursive CTE).
+        """
+        from sqlalchemy import select
+
+        from dendrux.db.models import AgentRun
+
+        async with self._session_factory() as session:
+            # 0. Load the run itself
+            stmt = select(AgentRun).where(AgentRun.id == run_id)
+            result = await session.execute(stmt)
+            run_row = result.scalar_one_or_none()
+            if run_row is None:
+                return None
+
+            # --- Resolve parent ---
+            parent: ParentRef | None = None
+            if run_row.parent_run_id:
+                p_stmt = select(AgentRun).where(
+                    AgentRun.id == run_row.parent_run_id,
+                )
+                p_result = await session.execute(p_stmt)
+                p_row = p_result.scalar_one_or_none()
+                if p_row is not None:
+                    parent = ParentRef(
+                        run_id=p_row.id,
+                        resolved=True,
+                        agent_name=p_row.agent_name,
+                        status=_extract_status(p_row),
+                        delegation_level=p_row.delegation_level,
+                    )
+                else:
+                    parent = ParentRef(
+                        run_id=run_row.parent_run_id,
+                        resolved=False,
+                    )
+
+            # --- Ancestry (walk up) ---
+            # O(depth) queries — acceptable for depth < ~20.
+            ancestry: list[RunBrief] = []
+            ancestry_complete = True
+            current_parent_id = run_row.parent_run_id
+            visited: set[str] = {run_id}  # Cycle guard
+            while current_parent_id and current_parent_id not in visited:
+                visited.add(current_parent_id)
+                a_stmt = select(AgentRun).where(AgentRun.id == current_parent_id)
+                a_result = await session.execute(a_stmt)
+                a_row = a_result.scalar_one_or_none()
+                if a_row is None:
+                    ancestry_complete = False
+                    break
+                ancestry.append(
+                    RunBrief(
+                        run_id=a_row.id,
+                        agent_name=a_row.agent_name,
+                        status=_extract_status(a_row),
+                        delegation_level=a_row.delegation_level,
+                    )
+                )
+                current_parent_id = a_row.parent_run_id
+            # Cycle detected — parent_run_id pointed back into visited set
+            if current_parent_id and current_parent_id in visited:
+                ancestry_complete = False
+            # Reverse so root is first: [root, ..., parent]
+            ancestry.reverse()
+
+            # --- Subtree BFS (downward) + direct children ---
+            # Single BFS walk collects both the subtree metrics AND
+            # direct children (first-level results). Saves one query
+            # vs a separate children query.
+            seen: set[str] = {run_id}
+            current_level = [run_id]
+            children: list[RunBrief] = []
+            max_depth = 0
+            depth = 0
+            sum_input = run_row.total_input_tokens or 0
+            sum_output = run_row.total_output_tokens or 0
+            sum_cost = 0.0
+            has_cost = run_row.total_cost_usd is not None
+            unknown_cost_count = 0 if has_cost else 1
+            if has_cost:
+                sum_cost = float(run_row.total_cost_usd)
+            descendant_count = 0
+            status_counts: dict[str, int] = {}
+            root_status = _extract_status(run_row)
+            status_counts[root_status] = 1
+            is_first_level = True
+
+            while current_level:
+                # Fetch all children of the current BFS frontier
+                child_stmt = (
+                    select(AgentRun)
+                    .where(AgentRun.parent_run_id.in_(current_level))
+                    # Order by created_at so direct children are sorted
+                    .order_by(AgentRun.created_at)
+                )
+                child_result = await session.execute(child_stmt)
+                child_rows = child_result.scalars().all()
+
+                next_level: list[str] = []
+                for cr in child_rows:
+                    if cr.id in seen:
+                        continue  # Cycle guard
+                    seen.add(cr.id)
+                    next_level.append(cr.id)
+                    descendant_count += 1
+                    sum_input += cr.total_input_tokens or 0
+                    sum_output += cr.total_output_tokens or 0
+                    if cr.total_cost_usd is not None:
+                        sum_cost += float(cr.total_cost_usd)
+                        has_cost = True
+                    else:
+                        unknown_cost_count += 1
+                    s = _extract_status(cr)
+                    status_counts[s] = status_counts.get(s, 0) + 1
+                    # First BFS level = direct children
+                    if is_first_level:
+                        children.append(
+                            RunBrief(
+                                run_id=cr.id,
+                                agent_name=cr.agent_name,
+                                status=s,
+                                delegation_level=cr.delegation_level,
+                            )
+                        )
+
+                is_first_level = False
+                if next_level:
+                    depth += 1
+                    max_depth = depth
+                current_level = next_level
+
+            subtree_summary = SubtreeSummary(
+                direct_child_count=len(children),
+                descendant_count=descendant_count,
+                max_depth=max_depth,
+                subtree_input_tokens=sum_input,
+                subtree_output_tokens=sum_output,
+                subtree_cost_usd=sum_cost if has_cost else None,
+                unknown_cost_count=unknown_cost_count,
+                status_counts=status_counts,
+            )
+
+            return DelegationInfo(
+                parent=parent,
+                children=children,
+                ancestry=ancestry,
+                subtree_summary=subtree_summary,
+                ancestry_complete=ancestry_complete,
+            )
+
     _MAX_LIST_LIMIT = 1000
 
     async def list_runs(
@@ -817,6 +1050,12 @@ class SQLAlchemyStateStore:
             return [_run_to_record(r) for r in rows]
 
 
+def _extract_status(row: AgentRun) -> str:
+    """Extract status string from an AgentRun, handling enum or raw string."""
+    s = row.status
+    return s.value if hasattr(s, "value") else str(s)
+
+
 def _run_to_record(row: AgentRun) -> RunRecord:
     """Convert an AgentRun ORM object to a RunRecord dataclass."""
     answer = None
@@ -825,7 +1064,7 @@ def _run_to_record(row: AgentRun) -> RunRecord:
     return RunRecord(
         id=row.id,
         agent_name=row.agent_name,
-        status=row.status.value if hasattr(row.status, "value") else str(row.status),
+        status=_extract_status(row),
         input_data=row.input_data,
         output_data=row.output_data,
         answer=answer,
