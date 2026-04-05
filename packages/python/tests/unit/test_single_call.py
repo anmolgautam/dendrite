@@ -398,6 +398,9 @@ class TestSingleCallRunnerIntegration:
 
             async def create_run(self, run_id, agent_name, **kwargs):
                 self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
+                from dendrux.types import CreateRunResult, RunStatus
+
+                return CreateRunResult(run_id=run_id, outcome="created", status=RunStatus.RUNNING)
 
             async def finalize_run(self, run_id, **kwargs):
                 self.finalized_runs.append({"run_id": run_id, **kwargs})

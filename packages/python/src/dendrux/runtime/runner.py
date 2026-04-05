@@ -31,7 +31,15 @@ from dendrux.runtime.context import (
     set_delegation_context,
 )
 from dendrux.strategies.native import NativeToolCalling
-from dendrux.types import PauseState, RunEventType, RunStatus, generate_ulid
+from dendrux.types import (
+    PauseState,
+    RunAlreadyActiveError,
+    RunEventType,
+    RunStatus,
+    UsageStats,
+    compute_idempotency_fingerprint,
+    generate_ulid,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -160,8 +168,7 @@ def _resolve_max_delegation_depth(
         and (not isinstance(requested, int) or requested < 0)
     ):
         raise ValueError(
-            f"max_delegation_depth must be a non-negative integer or None, "
-            f"got {requested!r}"
+            f"max_delegation_depth must be a non-negative integer or None, got {requested!r}"
         )
 
     # --- Resolution ---
@@ -182,8 +189,7 @@ def _resolve_max_delegation_depth(
                 and "depth_clamped" not in parent_ctx.warned_mismatches
             ):
                 logger.warning(
-                    "max_delegation_depth=%r clamped to %d "
-                    "(inherited parent limit)",
+                    "max_delegation_depth=%r clamped to %d (inherited parent limit)",
                     effective,
                     parent_limit,
                 )
@@ -207,6 +213,7 @@ async def run(
     redact: Callable[[str], str] | None = ...,
     extra_notifier: LoopNotifier | None = ...,
     max_delegation_depth: int | None,
+    idempotency_key: str | None = ...,
     **kwargs: Any,
 ) -> RunResult: ...
 
@@ -224,6 +231,7 @@ async def run(
     metadata: dict[str, Any] | None = ...,
     redact: Callable[[str], str] | None = ...,
     extra_notifier: LoopNotifier | None = ...,
+    idempotency_key: str | None = ...,
     **kwargs: Any,
 ) -> RunResult: ...
 
@@ -241,6 +249,7 @@ async def run(
     redact: Callable[[str], str] | None = None,
     extra_notifier: LoopNotifier | None = None,
     max_delegation_depth: int | None | _UnsetType = _UNSET_DEPTH,
+    idempotency_key: str | None = None,
     **kwargs: Any,
 ) -> RunResult:
     """Run an agent to completion.
@@ -317,7 +326,13 @@ async def run(
         run_meta["dendrux.loop"] = type(resolved_loop).__name__
         if effective_max_depth is not None:
             run_meta["dendrux.max_delegation_depth"] = effective_max_depth
-        await state_store.create_run(
+
+        # Compute idempotency fingerprint if key is provided
+        idem_fingerprint: str | None = None
+        if idempotency_key is not None:
+            idem_fingerprint = compute_idempotency_fingerprint(agent.name, user_input)
+
+        create_result = await state_store.create_run(
             run_id,
             agent.name,
             input_data={"input": redacted_input},
@@ -327,7 +342,18 @@ async def run(
             delegation_level=delegation_level,
             tenant_id=tenant_id,
             meta=run_meta,
+            idempotency_key=idempotency_key,
+            idempotency_fingerprint=idem_fingerprint,
         )
+
+        # Handle idempotency outcomes
+        if create_result.outcome == "existing_terminal":
+            return await _build_cached_result(state_store, create_result.run_id)
+        if create_result.outcome == "existing_active":
+            raise RunAlreadyActiveError(create_result.run_id, create_result.status)
+
+        # "created" — use the run_id from the result (same as generated)
+        run_id = create_result.run_id
 
         # Create persistence recorder with shared sequencer
         from dendrux.runtime.persistence import PersistenceRecorder
@@ -459,6 +485,40 @@ async def run(
         reset_delegation_context(ctx_token)
 
 
+async def _build_cached_result(state_store: StateStore, run_id: str) -> RunResult:
+    """Rebuild a summary RunResult from persisted DB state for idempotent dedup.
+
+    This is a *summary*, not a faithful replay of the original RunResult:
+    - steps is always [] (AgentStep history is not persisted in recoverable form)
+    - meta is empty (developer meta is on the run row, not in RunResult.meta)
+    - usage is reconstructed from aggregate columns (total_input_tokens, etc.),
+      which may be zero for errored runs where finalize_run got total_usage=None
+
+    The contract is: "return the cached final outcome" — status, answer, error,
+    iteration count, and aggregate usage. Not "return the identical object."
+    """
+    from dendrux.types import RunResult
+
+    run = await state_store.get_run(run_id)
+    if run is None:
+        raise RuntimeError(f"Idempotent run {run_id} not found in database")
+
+    return RunResult(
+        run_id=run.id,
+        status=RunStatus(run.status),
+        answer=run.answer,
+        steps=[],
+        iteration_count=run.iteration_count,
+        usage=UsageStats(
+            input_tokens=run.total_input_tokens,
+            output_tokens=run.total_output_tokens,
+            total_tokens=run.total_input_tokens + run.total_output_tokens,
+            cost_usd=run.total_cost_usd,
+        ),
+        error=run.error,
+    )
+
+
 @overload
 def run_stream(
     agent: Agent,
@@ -579,9 +639,7 @@ def run_stream(
             # --- Delegation context ---
             parent_ctx = get_delegation_context()
             parent_run_id, delegation_level = resolve_parent_link(parent_ctx, store)
-            eff_max_depth = _resolve_max_delegation_depth(
-                max_delegation_depth, parent_ctx
-            )
+            eff_max_depth = _resolve_max_delegation_depth(max_delegation_depth, parent_ctx)
 
             recorder: LoopRecorder | None = None
 
@@ -725,9 +783,7 @@ def run_stream(
                         expected_current_status="running",
                     )
                 except Exception:
-                    logger.error(
-                        "Failed to persist ERROR status for run %s", run_id, exc_info=True
-                    )
+                    logger.error("Failed to persist ERROR status for run %s", run_id, exc_info=True)
                 if error_won:
                     await _emit_event_safe(
                         store, run_id, "run.error", sequencer, {"error": str(exc)[:500]}
@@ -765,13 +821,9 @@ def run_stream(
                     expected_current_status="running",
                 )
                 if cancel_won and sequencer:
-                    await _emit_event(
-                        store, run_id, "run.cancelled", sequencer, {}
-                    )
+                    await _emit_event(store, run_id, "run.cancelled", sequencer, {})
             except Exception:
-                logger.error(
-                    "Failed to cancel run %s during stream cleanup", run_id, exc_info=True
-                )
+                logger.error("Failed to cancel run %s during stream cleanup", run_id, exc_info=True)
 
     return _RunStream(run_id=run_id, generator=_generate(), cleanup=_cleanup)
 
@@ -870,8 +922,13 @@ class _ResumeContext:
     """
 
     __slots__ = (
-        "history", "recorder", "notifier", "sequencer", "pause_state",
-        "resolved_loop", "resolved_strategy",
+        "history",
+        "recorder",
+        "notifier",
+        "sequencer",
+        "pause_state",
+        "resolved_loop",
+        "resolved_strategy",
     )
 
     def __init__(
@@ -1160,7 +1217,10 @@ async def _resume_core(
             result.meta["_finalize_won"] = finalize_won
             if finalize_won:
                 await _emit_event(
-                    state_store, run_id, "run.completed", ctx.sequencer,
+                    state_store,
+                    run_id,
+                    "run.completed",
+                    ctx.sequencer,
                     {"status": result.status.value},
                 )
 
@@ -1336,7 +1396,10 @@ def resume_stream(
                     )
                     if finalize_won:
                         await _emit_event(
-                            store, run_id, "run.completed", ctx.sequencer,
+                            store,
+                            run_id,
+                            "run.completed",
+                            ctx.sequencer,
                             {"status": result.status.value},
                         )
                     yield event
@@ -1387,12 +1450,13 @@ def resume_stream(
                         expected_current_status="running",
                     )
                 except Exception:
-                    logger.error(
-                        "Failed to persist ERROR status for run %s", run_id, exc_info=True
-                    )
+                    logger.error("Failed to persist ERROR status for run %s", run_id, exc_info=True)
                 if error_won:
                     await _emit_event_safe(
-                        store, run_id, "run.error", sequencer,
+                        store,
+                        run_id,
+                        "run.error",
+                        sequencer,
                         {"error": str(exc)[:500]},
                     )
 
@@ -1422,9 +1486,7 @@ def resume_stream(
                     expected_current_status="running",
                 )
                 if cancel_won and sequencer:
-                    await _emit_event(
-                        store, run_id, "run.cancelled", sequencer, {}
-                    )
+                    await _emit_event(store, run_id, "run.cancelled", sequencer, {})
             except Exception:
                 logger.error(
                     "Failed to cancel run %s during resume stream cleanup",

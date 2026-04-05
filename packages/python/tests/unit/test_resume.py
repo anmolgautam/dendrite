@@ -69,9 +69,12 @@ class RecordingStateStore:
     _claimed: set[str] = field(default_factory=set)
     _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
-    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
+    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any):
         self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
         self._run_status[run_id] = "running"
+        from dendrux.types import CreateRunResult, RunStatus
+
+        return CreateRunResult(run_id=run_id, outcome="created", status=RunStatus.RUNNING)
 
     async def save_trace(
         self, run_id: str, role: str, content: str, *, order_index: int, meta: Any = None

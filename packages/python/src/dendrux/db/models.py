@@ -87,10 +87,12 @@ class AgentRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Sweep / recovery columns
-    last_progress_at: Mapped[datetime.datetime | None] = mapped_column(
-        DateTime, nullable=True
-    )
+    last_progress_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Idempotency columns — duplicate run prevention
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(

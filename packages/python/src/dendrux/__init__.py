@@ -8,6 +8,11 @@ from dendrux.runtime.context import DelegationDepthExceededError
 from dendrux.runtime.runner import run
 from dendrux.runtime.sweep import sweep
 from dendrux.tool import tool
+from dendrux.types import (
+    CreateRunResult,
+    IdempotencyConflictError,
+    RunAlreadyActiveError,
+)
 
 # bridge() requires FastAPI (pip install dendrux[bridge]).
 # We must bind it at module level to shadow the subpackage name —
@@ -23,10 +28,20 @@ except ImportError as _err:
         def bridge(*args, **kwargs):  # type: ignore[misc]
             """Stub — raises when bridge extras are not installed."""
             raise ImportError(
-                "bridge requires optional dependencies. "
-                "Install with: pip install 'dendrux[bridge]'"
+                "bridge requires optional dependencies. Install with: pip install 'dendrux[bridge]'"
             ) from _missing_err
     else:
         raise
 
-__all__ = ["Agent", "DelegationDepthExceededError", "SingleCall", "bridge", "run", "sweep", "tool"]
+__all__ = [
+    "Agent",
+    "CreateRunResult",
+    "DelegationDepthExceededError",
+    "IdempotencyConflictError",
+    "RunAlreadyActiveError",
+    "SingleCall",
+    "bridge",
+    "run",
+    "sweep",
+    "tool",
+]

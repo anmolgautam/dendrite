@@ -12,10 +12,12 @@ Data flow:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine
@@ -657,3 +659,64 @@ class RunStream:
         async for event in self:
             if event.type == RunEventType.TEXT_DELTA and event.text:
                 yield event.text
+
+
+# ---------------------------------------------------------------------------
+# Idempotency
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CreateRunResult:
+    """Outcome of a create_run() call, including idempotency resolution."""
+
+    run_id: str
+    outcome: Literal["created", "existing_active", "existing_terminal"]
+    status: RunStatus
+
+
+class RunAlreadyActiveError(RuntimeError):
+    """Raised when an idempotency key matches a run that is still executing.
+
+    The caller should use ``agent.resume()`` or poll for completion
+    instead of starting a new run.
+    """
+
+    def __init__(self, run_id: str, current_status: RunStatus) -> None:
+        self.run_id = run_id
+        self.current_status = current_status
+        super().__init__(
+            f"Run {run_id} is already {current_status.value}. "
+            f"Use agent.resume() or wait for completion."
+        )
+
+
+class IdempotencyConflictError(RuntimeError):
+    """Raised when an idempotency key is reused with different request parameters.
+
+    This indicates a bug in the caller — keys must not be reused across
+    different requests. Generate a new key for each distinct request.
+    """
+
+    def __init__(self, run_id: str, idempotency_key: str) -> None:
+        self.run_id = run_id
+        self.idempotency_key = idempotency_key
+        super().__init__(
+            f"Idempotency key '{idempotency_key}' already used for run {run_id} "
+            f"with different input. Keys must not be reused across different requests."
+        )
+
+
+def compute_idempotency_fingerprint(agent_name: str, user_input: str) -> str:
+    """Deterministic SHA-256 fingerprint for idempotency conflict detection.
+
+    Includes agent_name + user_input (request identity). Does NOT include
+    provider kwargs (temperature, max_tokens) — those are execution tuning,
+    not request identity.
+    """
+    payload = json.dumps(
+        {"agent_name": agent_name, "user_input": user_input},
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

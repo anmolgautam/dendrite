@@ -43,8 +43,11 @@ class RecordingStateStore:
     usages: list[dict[str, Any]] = field(default_factory=list)
     _events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
-    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
+    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any):
         self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
+        from dendrux.types import CreateRunResult, RunStatus
+
+        return CreateRunResult(run_id=run_id, outcome="created", status=RunStatus.RUNNING)
 
     async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
         kwargs.pop("expected_current_status", None)

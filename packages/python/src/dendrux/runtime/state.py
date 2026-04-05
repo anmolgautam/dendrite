@@ -17,7 +17,13 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from dendrux.types import UsageStats, generate_ulid
+from dendrux.types import (
+    CreateRunResult,
+    IdempotencyConflictError,
+    RunStatus,
+    UsageStats,
+    generate_ulid,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
@@ -218,7 +224,9 @@ class StateStore(Protocol):
         delegation_level: int = 0,
         tenant_id: str | None = None,
         meta: dict[str, Any] | None = None,
-    ) -> None: ...
+        idempotency_key: str | None = None,
+        idempotency_fingerprint: str | None = None,
+    ) -> CreateRunResult: ...
 
     async def save_trace(
         self,
@@ -419,12 +427,23 @@ class SQLAlchemyStateStore:
         delegation_level: int = 0,
         tenant_id: str | None = None,
         meta: dict[str, Any] | None = None,
-    ) -> None:
+        idempotency_key: str | None = None,
+        idempotency_fingerprint: str | None = None,
+    ) -> CreateRunResult:
         import datetime as _dt
+
+        from sqlalchemy.exc import IntegrityError
 
         from dendrux.db.enums import AgentRunStatus
         from dendrux.db.models import AgentRun
 
+        # Fast path: if an idempotency key is provided, check for existing run
+        if idempotency_key is not None:
+            existing = await self._check_idempotency(idempotency_key, idempotency_fingerprint or "")
+            if existing is not None:
+                return existing
+
+        # Insert fresh row
         async with self._session_factory() as session:
             run = AgentRun(
                 id=run_id,
@@ -438,9 +457,81 @@ class SQLAlchemyStateStore:
                 tenant_id=tenant_id,
                 meta=meta,
                 last_progress_at=_dt.datetime.now(_dt.UTC),
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint=idempotency_fingerprint,
             )
             session.add(run)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                # Only resolve via idempotency if this is the idempotency
+                # unique constraint, not an arbitrary integrity error
+                if idempotency_key is not None and "idempotency_key" in str(exc):
+                    existing = await self._check_idempotency(
+                        idempotency_key, idempotency_fingerprint or ""
+                    )
+                    if existing is not None:
+                        return existing
+                raise
+
+        return CreateRunResult(
+            run_id=run_id,
+            outcome="created",
+            status=RunStatus.RUNNING,
+        )
+
+    async def _check_idempotency(
+        self,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> CreateRunResult | None:
+        """Check for existing run with this idempotency key.
+
+        Returns None if no match (caller should create fresh).
+        Returns CreateRunResult if match found.
+        Raises IdempotencyConflictError if key reused with different input.
+        """
+        from sqlalchemy import select
+
+        from dendrux.db.enums import AgentRunStatus
+        from dendrux.db.models import AgentRun
+
+        terminal = {
+            AgentRunStatus.SUCCESS,
+            AgentRunStatus.ERROR,
+            AgentRunStatus.CANCELLED,
+            AgentRunStatus.MAX_ITERATIONS,
+        }
+
+        async with self._session_factory() as session:
+            stmt = select(AgentRun).where(AgentRun.idempotency_key == idempotency_key)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+
+            if row is None:
+                return None
+
+            # Conflict check: same key, different request
+            if row.idempotency_fingerprint != fingerprint:
+                raise IdempotencyConflictError(
+                    run_id=row.id,
+                    idempotency_key=idempotency_key,
+                )
+
+            # Classify by status
+            status = RunStatus(row.status)
+            if row.status in terminal:
+                return CreateRunResult(
+                    run_id=row.id,
+                    outcome="existing_terminal",
+                    status=status,
+                )
+            return CreateRunResult(
+                run_id=row.id,
+                outcome="existing_active",
+                status=status,
+            )
 
     async def save_trace(
         self,
@@ -488,8 +579,7 @@ class SQLAlchemyStateStore:
             result_dict = json.loads(result_payload)
         except (json.JSONDecodeError, TypeError):
             logger.warning(
-                "Tool call result JSON decode failed — run=%s tool=%s "
-                "payload_len=%d",
+                "Tool call result JSON decode failed — run=%s tool=%s payload_len=%d",
                 run_id,
                 tool_name,
                 len(result_payload) if result_payload else 0,
@@ -969,12 +1059,9 @@ class SQLAlchemyStateStore:
             stale_ids = [r.id for r in stale_rows]
 
             # Check which runs have a run.started event (for classification)
-            started_stmt = (
-                select(RunEvent.agent_run_id)
-                .where(
-                    RunEvent.agent_run_id.in_(stale_ids),
-                    RunEvent.event_type == "run.started",
-                )
+            started_stmt = select(RunEvent.agent_run_id).where(
+                RunEvent.agent_run_id.in_(stale_ids),
+                RunEvent.event_type == "run.started",
             )
             started_result = await session.execute(started_stmt)
             started_run_ids = {row[0] for row in started_result.all()}
@@ -989,16 +1076,11 @@ class SQLAlchemyStateStore:
                 .group_by(RunEvent.agent_run_id)
             )
             seq_result = await session.execute(seq_stmt)
-            max_seqs: dict[str, int] = {
-                row[0]: row[1] for row in seq_result.all()
-            }
+            max_seqs: dict[str, int] = {row[0]: row[1] for row in seq_result.all()}
 
             # Process each stale run
             for row in stale_rows:
-                classification = (
-                    "stale_running" if row.id in started_run_ids
-                    else "never_started"
-                )
+                classification = "stale_running" if row.id in started_run_ids else "never_started"
 
                 # Mark as ERROR with failure_reason
                 update_stmt = (
@@ -1033,14 +1115,16 @@ class SQLAlchemyStateStore:
                 # If run N+1 fails, runs 0..N are already committed.
                 await session.commit()
 
-                swept.append(SweptRun(
-                    run_id=row.id,
-                    agent_name=row.agent_name,
-                    previous_status="running",
-                    failure_reason=classification,
-                    last_progress_at=row.last_progress_at,
-                    swept_at=now,
-                ))
+                swept.append(
+                    SweptRun(
+                        run_id=row.id,
+                        agent_name=row.agent_name,
+                        previous_status="running",
+                        failure_reason=classification,
+                        last_progress_at=row.last_progress_at,
+                        swept_at=now,
+                    )
+                )
 
         return swept
 

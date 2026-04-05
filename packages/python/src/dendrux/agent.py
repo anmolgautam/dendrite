@@ -52,8 +52,7 @@ def _validate_max_delegation_depth(value: int | None | _UnsetType) -> None:
         return
     if value is not None and (not isinstance(value, int) or value < 0):
         raise ValueError(
-            f"max_delegation_depth must be a non-negative integer or None, "
-            f"got {value!r}"
+            f"max_delegation_depth must be a non-negative integer or None, got {value!r}"
         )
 
 
@@ -368,6 +367,7 @@ class Agent:
         metadata: dict[str, Any] | None = ...,
         notifier: LoopNotifier | None = ...,
         max_delegation_depth: int | None,
+        idempotency_key: str | None = ...,
         **kwargs: Any,
     ) -> RunResult: ...
 
@@ -379,6 +379,7 @@ class Agent:
         tenant_id: str | None = ...,
         metadata: dict[str, Any] | None = ...,
         notifier: LoopNotifier | None = ...,
+        idempotency_key: str | None = ...,
         **kwargs: Any,
     ) -> RunResult: ...
 
@@ -390,6 +391,7 @@ class Agent:
         metadata: dict[str, Any] | None = None,
         notifier: LoopNotifier | None = None,
         max_delegation_depth: int | None | _UnsetType = _UNSET,
+        idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> RunResult:
         """Start a new agent run.
@@ -407,13 +409,23 @@ class Agent:
             max_delegation_depth: Maximum allowed delegation depth for the run
                 tree. Default 10. None means unbounded. Child runs inherit
                 this limit automatically.
+            idempotency_key: Optional key for duplicate run prevention. If a run
+                with this key already exists and completed, the cached result is
+                returned. If still active, RunAlreadyActiveError is raised. If the
+                same key is reused with different input, IdempotencyConflictError
+                is raised. Requires persistence (database_url, state_store, or
+                DENDRUX_DATABASE_URL).
             **kwargs: Forwarded to the LLM provider (temperature, max_tokens, etc.).
 
         Returns:
             RunResult with status, answer, steps, and usage stats.
 
         Raises:
-            ValueError: If no provider is configured.
+            ValueError: If no provider is configured, or if idempotency_key
+                is provided without persistence.
+            RunAlreadyActiveError: If idempotency_key matches an active run.
+            IdempotencyConflictError: If idempotency_key is reused with
+                different request parameters.
             DelegationDepthExceededError: If this run would exceed the inherited
                 max_delegation_depth from a parent run.
         """
@@ -421,6 +433,12 @@ class Agent:
         provider = self._require_provider()
 
         store = await self._resolve_state_store()
+
+        if idempotency_key is not None and store is None:
+            raise ValueError(
+                "idempotency_key requires persistence (database_url, state_store, "
+                "or DENDRUX_DATABASE_URL). Idempotency cannot work without durable state."
+            )
 
         from dendrux.runtime.runner import run as runner_run
 
@@ -438,6 +456,7 @@ class Agent:
             metadata=metadata,
             redact=self._redact,
             extra_notifier=notifier,
+            idempotency_key=idempotency_key,
             **run_kwargs,
             **kwargs,
         )
@@ -645,9 +664,7 @@ class Agent:
         if tool_results is not None and user_input is not None:
             raise ValueError("Cannot provide both tool_results and user_input to resume_stream().")
         if tool_results is None and user_input is None:
-            raise ValueError(
-                "resume_stream() requires either tool_results or user_input."
-            )
+            raise ValueError("resume_stream() requires either tool_results or user_input.")
 
         from dendrux.runtime.runner import resume_stream as runner_resume_stream
 
