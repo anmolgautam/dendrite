@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import os
 
-from firecrawl import Firecrawl  # type: ignore[import-untyped]
-
 from dendrux import tool
+from firecrawl import Firecrawl
 
 
 def _get_client() -> Firecrawl:
@@ -19,14 +18,16 @@ async def firecrawl_search(query: str) -> str:
     client = _get_client()
     results = client.search(query, limit=5)
 
-    if not results.get("data"):
+    # SDK v4 returns SearchData with .web list of SearchResult objects
+    items = results.web if results.web else []
+    if not items:
         return f"No results found for: {query}"
 
     formatted = []
-    for i, item in enumerate(results["data"], 1):
-        title = item.get("title", "No title")
-        url = item.get("url", "")
-        snippet = item.get("description", item.get("markdown", ""))[:300]
+    for i, item in enumerate(items, 1):
+        title = item.title or "No title"
+        url = item.url or ""
+        snippet = (item.description or "")[:300]
         formatted.append(f"[{i}] {title}\n    URL: {url}\n    {snippet}")
 
     return "\n\n".join(formatted)
@@ -38,7 +39,8 @@ async def firecrawl_scrape(url: str) -> str:
     client = _get_client()
     result = client.scrape(url)
 
-    markdown = result.get("markdown", "")
+    # SDK v4 returns ScrapeData with .markdown attribute
+    markdown = result.markdown or ""
     if not markdown:
         return f"Could not extract content from: {url}"
 

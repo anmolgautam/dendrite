@@ -7,8 +7,8 @@ Demonstrates the **agent-as-tool** pattern — an orchestrator agent delegates t
 ```
 Orchestrator (ResearchOrchestrator)
   |
-  +-- research_topic(query)     --> SearchAgent --> firecrawl_search
-  +-- deep_read(url)            --> ScrapeAgent --> firecrawl_scrape
+  +-- research_topic(query)     --> SearchAgent --> Firecrawl search
+  +-- deep_read(url)            --> ScrapeAgent --> Firecrawl scrape
   +-- save_report(filename)     --> writes .md to output/
 ```
 
@@ -29,7 +29,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 FIRECRAWL_API_KEY=fc-...
 ```
 
-Get a Firecrawl API key at https://firecrawl.dev (free tier available).
+Get a Firecrawl API key at [firecrawl.dev](https://firecrawl.dev) (free tier available).
 
 ## Run
 
@@ -40,33 +40,39 @@ python main.py "quantum computing breakthroughs 2025"
 
 The orchestrator will:
 1. Break the topic into focused queries
-2. Delegate each query to a SearchAgent (max 3 searches)
+2. Delegate each to a SearchAgent (max 3 searches)
 3. Optionally deep-read promising URLs via ScrapeAgent (max 2 reads)
 4. Synthesize findings into a markdown report
 5. Save to `output/<topic>.md`
 
-## Token Budget
+## Streaming Mode
 
-Sub-agent calls are expensive (each one does its own LLM reasoning loop), so call counts are capped using Dendrux's built-in `max_calls_per_run`:
+Run the same flow with real-time event streaming:
 
-```python
-@tool(max_calls_per_run=3, timeout_seconds=120)
-async def research_topic(query: str) -> str:
-    ...
+```bash
+python stream_test.py "quantum computing 2025"
 ```
 
-- **3** search calls (`research_topic`)
-- **2** deep reads (`deep_read`)
+Shows token-by-token text, tool start/end events, and a completion summary.
 
-When a tool hits its limit, Dendrux returns a graceful message to the LLM — no crash, the agent adapts and moves to synthesis.
+## What It Shows
 
-## Inspect
+- **Agent-as-tool composition** — sub-agents run inside `@tool()` functions
+- **`max_calls_per_run`** — runtime-enforced tool call limits (no manual counters)
+- **`timeout_seconds`** — explicit timeouts for long-running sub-agent tools
+- **`ConsoleNotifier`** — rich terminal output showing iterations, tool calls, and summary
+- **Persistence** — all agents share a local `research.db` for run inspection
+- **Streaming** — `stream_test.py` demonstrates `agent.stream()` with event handling
+- **Multi-provider** — swap `AnthropicProvider` → `OpenAIProvider` in one line
+
+## Inspect Runs
 
 With persistence enabled, inspect any run after it completes:
 
 ```bash
 dendrux runs
 dendrux traces <run_id> --tools
+dendrux dashboard
 ```
 
 ## Files
@@ -74,10 +80,11 @@ dendrux traces <run_id> --tools
 ```
 04_research_agent/
 ├── main.py                  # Orchestrator agent + entry point
+├── stream_test.py           # Streaming variant with event handling
 ├── agents/
 │   ├── search_agent.py      # SearchAgent: query -> Firecrawl search -> summary
 │   └── scrape_agent.py      # ScrapeAgent: URL -> Firecrawl scrape -> summary
 ├── tools/
-│   └── firecrawl_tools.py   # Raw Firecrawl SDK wrappers
+│   └── firecrawl_tools.py   # Raw Firecrawl SDK v4 wrappers
 └── output/                  # Generated reports
 ```

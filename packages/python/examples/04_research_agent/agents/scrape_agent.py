@@ -6,10 +6,15 @@ summary of the content.
 
 from __future__ import annotations
 
-from tools.firecrawl_tools import firecrawl_scrape
+from pathlib import Path
 
 from dendrux import Agent
 from dendrux.llm.anthropic import AnthropicProvider
+
+from tools.firecrawl_tools import firecrawl_scrape
+
+DB_PATH = Path(__file__).parents[1] / "research.db"
+DB_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
 SCRAPE_PROMPT = """\
 You are a content extraction specialist. Your job is to read a web page and return
@@ -30,6 +35,7 @@ async def run_scrape(url: str) -> str:
     async with Agent(
         name="ScrapeAgent",
         provider=AnthropicProvider(model="claude-sonnet-4-6"),
+        database_url=DB_URL,
         prompt=SCRAPE_PROMPT,
         tools=[firecrawl_scrape],
     ) as agent:
