@@ -1,4 +1,4 @@
-"""Tests for runner persistence wiring — state_store, observer, finalize_run."""
+"""Tests for runner persistence wiring — state_store, notifier, finalize_run."""
 
 from __future__ import annotations
 
@@ -201,11 +201,11 @@ class TestRunnerPersistence:
 
 
 # ------------------------------------------------------------------
-# Observer records traces and tool calls
+# Recorder records traces and tool calls
 # ------------------------------------------------------------------
 
 
-class TestRunnerObserverWiring:
+class TestRunnerRecorderWiring:
     async def test_traces_recorded(self) -> None:
         store = RecordingStateStore()
         llm = MockLLM([LLMResponse(text="42")])

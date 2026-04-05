@@ -49,7 +49,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from dendrux.auth import extract_bearer_token, generate_run_token, verify_run_token
-from dendrux.bridge.observer import ServerEvent, TransportObserver
+from dendrux.bridge.notifier import ServerEvent, TransportNotifier
 from dendrux.bridge.tasks import RunTaskManager
 
 if TYPE_CHECKING:
@@ -225,7 +225,7 @@ def bridge(
         queue = sse_queues[run_id]
 
         async def _resume_task() -> None:
-            transport_obs = TransportObserver(queue, redact=agent._redact)
+            transport_notifier = TransportNotifier(queue, redact=agent._redact)
             try:
                 won = await store.submit_and_claim(
                     run_id,
@@ -247,7 +247,7 @@ def bridge(
                     agent=agent,
                     provider=provider,
                     redact=agent._redact,
-                    extra_observer=transport_obs,
+                    extra_notifier=transport_notifier,
                 )
 
                 # Emit SSE event based on outcome.

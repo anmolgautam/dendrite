@@ -1,4 +1,4 @@
-"""Tests for ConsoleObserver and observer composition in agent.run()."""
+"""Tests for ConsoleNotifier and notifier composition in agent.run()."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ import pytest
 
 from dendrux.agent import Agent
 from dendrux.llm.mock import MockLLM
-from dendrux.observers.composite import CompositeObserver
-from dendrux.observers.console import ConsoleObserver
+from dendrux.notifiers.composite import CompositeNotifier
+from dendrux.notifiers.console import ConsoleNotifier
 from dendrux.tool import tool
 from dendrux.types import LLMResponse, Message, Role, ToolCall, ToolResult
 
 
-class RecordingObserver:
-    """Test observer that records all events."""
+class RecordingNotifier:
+    """Test notifier that records all events."""
 
     def __init__(self) -> None:
         self.messages: list[tuple[Message, int]] = []
@@ -36,12 +36,12 @@ class RecordingObserver:
         self.tool_completions.append((tool_call, tool_result, iteration))
 
 
-class TestConsoleObserver:
-    """Test that ConsoleObserver implements the protocol without errors."""
+class TestConsoleNotifier:
+    """Test that ConsoleNotifier implements the protocol without errors."""
 
     async def test_text_run(self) -> None:
-        """ConsoleObserver handles a simple text-only run."""
-        obs = ConsoleObserver()
+        """ConsoleNotifier handles a simple text-only run."""
+        obs = ConsoleNotifier()
         msg = Message(role=Role.USER, content="hello")
         await obs.on_message_appended(msg, 0)
 
@@ -52,8 +52,8 @@ class TestConsoleObserver:
         await obs.on_message_appended(assistant_msg, 1)
 
     async def test_tool_call_run(self) -> None:
-        """ConsoleObserver handles tool calls and results."""
-        obs = ConsoleObserver()
+        """ConsoleNotifier handles tool calls and results."""
+        obs = ConsoleNotifier()
 
         tc = ToolCall(name="add", params={"a": 1, "b": 2})
         assistant_msg = Message(role=Role.ASSISTANT, content="", tool_calls=[tc])
@@ -63,8 +63,8 @@ class TestConsoleObserver:
         await obs.on_tool_completed(tc, tr, 1)
 
     async def test_failed_tool(self) -> None:
-        """ConsoleObserver handles failed tools gracefully."""
-        obs = ConsoleObserver()
+        """ConsoleNotifier handles failed tools gracefully."""
+        obs = ConsoleNotifier()
 
         tc = ToolCall(name="broken", params={})
         tr = ToolResult(
@@ -74,8 +74,8 @@ class TestConsoleObserver:
         await obs.on_tool_completed(tc, tr, 1)
 
     async def test_max_calls_limit_display(self) -> None:
-        """ConsoleObserver shows limit message for max_calls_per_run."""
-        obs = ConsoleObserver()
+        """ConsoleNotifier shows limit message for max_calls_per_run."""
+        obs = ConsoleNotifier()
 
         tc = ToolCall(name="search", params={})
         tr = ToolResult(
@@ -86,18 +86,18 @@ class TestConsoleObserver:
 
     async def test_large_params_truncated(self) -> None:
         """Large tool params are truncated, not dumped."""
-        obs = ConsoleObserver()
+        obs = ConsoleNotifier()
 
         tc = ToolCall(name="save", params={"content": "x" * 1000})
         assistant_msg = Message(role=Role.ASSISTANT, content="", tool_calls=[tc])
         await obs.on_message_appended(assistant_msg, 1)
 
 
-class TestAgentRunWithObserver:
-    """Test that agent.run(observer=...) threads the observer correctly."""
+class TestAgentRunWithNotifier:
+    """Test that agent.run(notifier=...) threads the notifier correctly."""
 
-    async def test_observer_receives_events(self) -> None:
-        """External observer receives all lifecycle events from agent.run()."""
+    async def test_notifier_receives_events(self) -> None:
+        """External notifier receives all lifecycle events from agent.run()."""
         @tool()
         async def add(a: int, b: int) -> int:
             """Add."""
@@ -110,35 +110,35 @@ class TestAgentRunWithObserver:
         ]
         mock = MockLLM(responses=responses)
 
-        recording = RecordingObserver()
+        recording = RecordingNotifier()
         agent = Agent(provider=mock, prompt="test", tools=[add])
-        result = await agent.run("What is 1+2?", observer=recording)
+        result = await agent.run("What is 1+2?", notifier=recording)
 
-        # Observer received events
+        # Notifier received events
         assert len(recording.messages) > 0
         assert len(recording.llm_calls) > 0
         assert len(recording.tool_completions) == 1
         assert recording.tool_completions[0][1].success is True
 
-    async def test_observer_without_persistence(self) -> None:
-        """Observer works even without database persistence."""
+    async def test_notifier_without_persistence(self) -> None:
+        """Notifier works even without database persistence."""
         responses = [LLMResponse(text="hello")]
         mock = MockLLM(responses=responses)
 
-        recording = RecordingObserver()
+        recording = RecordingNotifier()
         agent = Agent(provider=mock, prompt="test", tools=[])
-        result = await agent.run("hi", observer=recording)
+        result = await agent.run("hi", notifier=recording)
 
         assert result.answer == "hello"
         assert len(recording.messages) >= 1  # At least user + assistant
 
 
-class TestCompositeObserver:
+class TestCompositeNotifier:
     async def test_fans_out_to_all(self) -> None:
-        """CompositeObserver dispatches to all registered observers."""
-        r1 = RecordingObserver()
-        r2 = RecordingObserver()
-        composite = CompositeObserver([r1, r2])
+        """CompositeNotifier dispatches to all registered notifiers."""
+        r1 = RecordingNotifier()
+        r2 = RecordingNotifier()
+        composite = CompositeNotifier([r1, r2])
 
         msg = Message(role=Role.USER, content="hello")
         await composite.on_message_appended(msg, 0)
@@ -147,8 +147,8 @@ class TestCompositeObserver:
         assert len(r2.messages) == 1
 
     async def test_one_failure_doesnt_block_others(self) -> None:
-        """If one observer fails, others still receive events."""
-        class FailingObserver:
+        """If one notifier fails, others still receive events."""
+        class FailingNotifier:
             async def on_message_appended(self, message: Any, iteration: int) -> None:
                 raise RuntimeError("boom")
 
@@ -158,11 +158,11 @@ class TestCompositeObserver:
             async def on_tool_completed(self, tc: Any, tr: Any, iteration: int) -> None:
                 pass
 
-        recording = RecordingObserver()
-        composite = CompositeObserver([FailingObserver(), recording])  # type: ignore[list-item]
+        recording = RecordingNotifier()
+        composite = CompositeNotifier([FailingNotifier(), recording])  # type: ignore[list-item]
 
         msg = Message(role=Role.USER, content="hello")
         await composite.on_message_appended(msg, 0)
 
-        # Recording observer still received the event
+        # Recording notifier still received the event
         assert len(recording.messages) == 1

@@ -230,16 +230,16 @@ class TestSingleCallRun:
 
 
 # ------------------------------------------------------------------
-# SingleCall.run() — observer hooks
+# SingleCall.run() — notifier hooks
 # ------------------------------------------------------------------
 
 
-class TestSingleCallObserver:
-    async def test_observer_hooks_fire(self) -> None:
-        observer = AsyncMock()
-        observer.on_message_appended = AsyncMock()
-        observer.on_llm_call_completed = AsyncMock()
-        observer.on_tool_completed = AsyncMock()
+class TestSingleCallNotifier:
+    async def test_notifier_hooks_fire(self) -> None:
+        notifier = AsyncMock()
+        notifier.on_message_appended = AsyncMock()
+        notifier.on_llm_call_completed = AsyncMock()
+        notifier.on_tool_completed = AsyncMock()
 
         llm = MockLLM([_response("positive")])
         agent = _make_agent()
@@ -249,21 +249,21 @@ class TestSingleCallObserver:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="test",
-            observer=observer,
+            notifier=notifier,
         )
 
         # user message + assistant message = 2 calls
-        assert observer.on_message_appended.call_count == 2
+        assert notifier.on_message_appended.call_count == 2
         # one LLM call
-        assert observer.on_llm_call_completed.call_count == 1
+        assert notifier.on_llm_call_completed.call_count == 1
         # no tool calls
-        assert observer.on_tool_completed.call_count == 0
+        assert notifier.on_tool_completed.call_count == 0
 
-    async def test_observer_messages_correct(self) -> None:
-        observer = AsyncMock()
-        observer.on_message_appended = AsyncMock()
-        observer.on_llm_call_completed = AsyncMock()
-        observer.on_tool_completed = AsyncMock()
+    async def test_notifier_messages_correct(self) -> None:
+        notifier = AsyncMock()
+        notifier.on_message_appended = AsyncMock()
+        notifier.on_llm_call_completed = AsyncMock()
+        notifier.on_tool_completed = AsyncMock()
 
         llm = MockLLM([_response("negative")])
         agent = _make_agent()
@@ -273,16 +273,16 @@ class TestSingleCallObserver:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="I hate bugs",
-            observer=observer,
+            notifier=notifier,
         )
 
         # First call: user message
-        first_msg: Message = observer.on_message_appended.call_args_list[0][0][0]
+        first_msg: Message = notifier.on_message_appended.call_args_list[0][0][0]
         assert first_msg.role == Role.USER
         assert first_msg.content == "I hate bugs"
 
         # Second call: assistant message
-        second_msg: Message = observer.on_message_appended.call_args_list[1][0][0]
+        second_msg: Message = notifier.on_message_appended.call_args_list[1][0][0]
         assert second_msg.role == Role.ASSISTANT
         assert second_msg.content == "negative"
 

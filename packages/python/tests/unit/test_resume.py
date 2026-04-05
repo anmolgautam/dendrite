@@ -382,7 +382,7 @@ class TestResume:
         # Should have both pre-pause and post-resume steps
         assert len(r2.steps) == 2
 
-    async def test_observer_order_index_continues(self) -> None:
+    async def test_recorder_order_index_continues(self) -> None:
         """Trace order_index continues from max existing index after resume."""
         agent = _make_agent()
         store = RecordingStateStore()

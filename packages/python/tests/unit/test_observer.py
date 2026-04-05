@@ -1,11 +1,11 @@
-"""Tests for PersistenceObserver — unit tests with a mock StateStore."""
+"""Tests for PersistenceRecorder — unit tests with a mock StateStore."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from dendrux.runtime.observer import PersistenceObserver
+from dendrux.runtime.persistence import PersistenceRecorder
 from dendrux.types import (
     LLMResponse,
     Message,
@@ -80,7 +80,7 @@ class MockStateStore:
 class TestOnMessageAppended:
     async def test_persists_user_message(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         msg = Message(role=Role.USER, content="hello")
         await obs.on_message_appended(msg, iteration=0)
@@ -95,7 +95,7 @@ class TestOnMessageAppended:
 
     async def test_increments_order_index(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         await obs.on_message_appended(Message(role=Role.USER, content="a"), iteration=0)
         await obs.on_message_appended(Message(role=Role.ASSISTANT, content="b"), iteration=1)
@@ -106,7 +106,7 @@ class TestOnMessageAppended:
 
     async def test_assistant_with_tool_calls_stores_meta(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="add", params={"a": 1}, provider_tool_call_id="p1")
         msg = Message(role=Role.ASSISTANT, content="calling", tool_calls=[tc])
@@ -120,7 +120,7 @@ class TestOnMessageAppended:
 
     async def test_tool_message_stores_call_id_and_name(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         msg = Message(role=Role.TOOL, content='{"result": 42}', call_id="tc_1", name="add")
         await obs.on_message_appended(msg, iteration=1)
@@ -131,7 +131,7 @@ class TestOnMessageAppended:
 
     async def test_preserves_existing_message_meta(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         msg = Message(role=Role.USER, content="hi", meta={"custom_key": "value"})
         await obs.on_message_appended(msg, iteration=0)
@@ -149,7 +149,7 @@ class TestOnMessageAppended:
 class TestOnLLMCallCompleted:
     async def test_persists_usage(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
+        obs = PersistenceRecorder(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
 
         response = LLMResponse(
             text="hi",
@@ -168,7 +168,7 @@ class TestOnLLMCallCompleted:
 
     async def test_no_model_or_provider(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         response = LLMResponse(text="hi")
         await obs.on_llm_call_completed(response, iteration=0)
@@ -186,7 +186,7 @@ class TestOnLLMCallCompleted:
 class TestOnToolCompleted:
     async def test_persists_tool_call(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="p1")
         result = ToolResult(
@@ -213,7 +213,7 @@ class TestOnToolCompleted:
 
     async def test_failed_tool_call(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="bad_tool", params={})
         result = ToolResult(
@@ -232,7 +232,7 @@ class TestOnToolCompleted:
 
     async def test_empty_params_become_none(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="no_args", params={})
         result = ToolResult(name="no_args", call_id=tc.id, payload="{}", success=True)
@@ -249,7 +249,7 @@ class TestOnToolCompleted:
 class TestRedaction:
     async def test_redact_scrubs_trace_content(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("secret", "***"))
 
         msg = Message(role=Role.USER, content="my secret password")
         await obs.on_message_appended(msg, iteration=0)
@@ -258,7 +258,7 @@ class TestRedaction:
 
     async def test_redact_scrubs_tool_params(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("token123", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("token123", "***"))
 
         tc = ToolCall(name="auth", params={"key": "token123", "count": 5})
         msg = Message(role=Role.ASSISTANT, content="calling", tool_calls=[tc])
@@ -270,7 +270,7 @@ class TestRedaction:
 
     async def test_redact_scrubs_tool_result_payload(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("secret", "***"))
 
         tc = ToolCall(name="fetch", params={"url": "x"})
         result = ToolResult(name="fetch", call_id=tc.id, payload='{"data": "secret"}', success=True)
@@ -281,7 +281,7 @@ class TestRedaction:
 
     async def test_redact_scrubs_error_message(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("secret", "***"))
 
         tc = ToolCall(name="bad", params={})
         result = ToolResult(
@@ -294,7 +294,7 @@ class TestRedaction:
     async def test_aggressive_redactor_does_not_crash(self) -> None:
         """A redactor that returns '***' for everything should not raise."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda _: "***")
+        obs = PersistenceRecorder(store, "run_1", redact=lambda _: "***")
 
         msg = Message(role=Role.USER, content="hello")
         await obs.on_message_appended(msg, iteration=0)
@@ -309,7 +309,7 @@ class TestRedaction:
     async def test_no_redact_is_identity(self) -> None:
         """Without redact, content passes through unchanged."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         msg = Message(role=Role.USER, content="secret data")
         await obs.on_message_appended(msg, iteration=0)
@@ -318,7 +318,7 @@ class TestRedaction:
     async def test_redact_handles_nested_params(self) -> None:
         """Redaction should recurse into nested dicts and lists."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("secret", "***"))
 
         tc = ToolCall(
             name="deploy",
@@ -340,7 +340,7 @@ class TestRedaction:
     async def test_redact_nested_in_tool_completed(self) -> None:
         """on_tool_completed also recurses into nested params."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", redact=lambda s: s.replace("secret", "***"))
+        obs = PersistenceRecorder(store, "run_1", redact=lambda s: s.replace("secret", "***"))
 
         tc = ToolCall(name="auth", params={"creds": {"password": "secret123"}})
         result = ToolResult(name="auth", call_id=tc.id, payload="{}", success=True)
@@ -357,7 +357,7 @@ class TestRedaction:
 class TestRedactCycleGuard:
     def test_circular_dict_replaced_with_placeholder(self) -> None:
         """Self-referencing dict is replaced with a JSON-safe placeholder."""
-        from dendrux.runtime.observer import _redact_value
+        from dendrux.runtime.persistence import _redact_value
 
         d: dict[str, Any] = {"key": "secret"}
         d["self"] = d  # circular reference
@@ -368,7 +368,7 @@ class TestRedactCycleGuard:
 
     def test_circular_list_replaced_with_placeholder(self) -> None:
         """Self-referencing list is replaced with a JSON-safe placeholder."""
-        from dendrux.runtime.observer import _redact_value
+        from dendrux.runtime.persistence import _redact_value
 
         lst: list[Any] = ["secret"]
         lst.append(lst)  # circular reference
@@ -381,7 +381,7 @@ class TestRedactCycleGuard:
         """After redaction, circular structures can be safely JSON-serialized."""
         import json as _json
 
-        from dendrux.runtime.observer import _redact_value
+        from dendrux.runtime.persistence import _redact_value
 
         d: dict[str, Any] = {"key": "secret"}
         d["self"] = d
@@ -393,7 +393,7 @@ class TestRedactCycleGuard:
 
     def test_shared_subdict_redacted_on_every_path(self) -> None:
         """A shared (non-cyclic) sub-dict is redacted each time it appears."""
-        from dendrux.runtime.observer import _redact_value
+        from dendrux.runtime.persistence import _redact_value
 
         shared = {"password": "secret"}
         d = {"a": shared, "b": shared}
@@ -404,7 +404,7 @@ class TestRedactCycleGuard:
 
     def test_deep_nesting_still_redacts(self) -> None:
         """Normal deep nesting should still work fine."""
-        from dendrux.runtime.observer import _redact_value
+        from dendrux.runtime.persistence import _redact_value
 
         d = {"a": {"b": {"c": {"d": "secret"}}}}
         result = _redact_value(d, lambda s: s.upper())

@@ -1,4 +1,4 @@
-"""Tests for bridge infrastructure — observer and task manager."""
+"""Tests for bridge infrastructure — notifier and task manager."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ from typing import Any
 
 import pytest
 
-from dendrux.bridge.observer import CompositeObserver, ServerEvent, TransportObserver
+from dendrux.bridge.notifier import CompositeNotifier, ServerEvent, TransportNotifier
 from dendrux.bridge.tasks import RunTaskManager
 from dendrux.types import Message, Role, ToolCall, ToolResult
 
 
-class TestTransportObserver:
+class TestTransportNotifier:
     async def test_queues_events(self) -> None:
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
-        obs = TransportObserver(queue)
+        obs = TransportNotifier(queue)
 
         msg = Message(role=Role.USER, content="hello")
         await obs.on_message_appended(msg, iteration=0)
@@ -26,10 +26,10 @@ class TestTransportObserver:
         assert event.data["content"] == "hello"
 
     async def test_redaction_applied_to_content(self) -> None:
-        """H-006: TransportObserver redacts message content when redact is set."""
+        """H-006: TransportNotifier redacts message content when redact is set."""
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
         redact = lambda text: text.replace("secret-key-123", "[REDACTED]")  # noqa: E731
-        obs = TransportObserver(queue, redact=redact)
+        obs = TransportNotifier(queue, redact=redact)
 
         msg = Message(role=Role.ASSISTANT, content="The API key is secret-key-123")
         await obs.on_message_appended(msg, iteration=0)
@@ -41,7 +41,7 @@ class TestTransportObserver:
     async def test_no_redaction_when_none(self) -> None:
         """Without redact, content passes through unchanged."""
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
-        obs = TransportObserver(queue)
+        obs = TransportNotifier(queue)
 
         msg = Message(role=Role.ASSISTANT, content="The API key is secret-key-123")
         await obs.on_message_appended(msg, iteration=0)
@@ -51,7 +51,7 @@ class TestTransportObserver:
 
     async def test_tool_completion_event(self) -> None:
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
-        obs = TransportObserver(queue)
+        obs = TransportNotifier(queue)
 
         tc = ToolCall(name="add", params={"a": 1})
         tr = ToolResult(name="add", call_id=tc.id, payload="3", success=True)
@@ -63,11 +63,11 @@ class TestTransportObserver:
         assert event.data["success"] is True
 
 
-class TestCompositeObserver:
+class TestCompositeNotifier:
     async def test_fans_out_to_all(self) -> None:
         q1: asyncio.Queue[ServerEvent] = asyncio.Queue()
         q2: asyncio.Queue[ServerEvent] = asyncio.Queue()
-        obs = CompositeObserver([TransportObserver(q1), TransportObserver(q2)])
+        obs = CompositeNotifier([TransportNotifier(q1), TransportNotifier(q2)])
 
         msg = Message(role=Role.USER, content="hi")
         await obs.on_message_appended(msg, iteration=0)
@@ -78,9 +78,9 @@ class TestCompositeObserver:
         assert e2.event == "run.step"
 
     async def test_one_failure_doesnt_block_others(self) -> None:
-        """If one observer fails, the others still fire."""
+        """If one notifier fails, the others still fire."""
 
-        class FailingObserver:
+        class FailingNotifier:
             async def on_message_appended(self, message: Any, iteration: int) -> None:
                 raise RuntimeError("boom")
 
@@ -93,7 +93,7 @@ class TestCompositeObserver:
                 pass
 
         queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
-        obs = CompositeObserver([FailingObserver(), TransportObserver(queue)])  # type: ignore[list-item]
+        obs = CompositeNotifier([FailingNotifier(), TransportNotifier(queue)])  # type: ignore[list-item]
 
         msg = Message(role=Role.USER, content="hi")
         await obs.on_message_appended(msg, iteration=0)

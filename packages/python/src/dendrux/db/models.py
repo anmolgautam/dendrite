@@ -280,7 +280,7 @@ class RunEvent(Base):
 
     Ordering: sequence_index is the stable ordering key within a run.
     Timestamps alone are not safe (concurrent events within the same ms).
-    The observer increments sequence_index monotonically.
+    The notifier increments sequence_index monotonically.
 
     Correlation: correlation_id links related events (e.g. tool.completed
     back to the tool_call_id, run.resumed to the original run.paused).

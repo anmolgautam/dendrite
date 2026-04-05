@@ -405,8 +405,6 @@ class TestSweepPublicAPI:
         from sqlalchemy import event
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        from dendrux.db.models import Base
-
         eng = create_async_engine(
             db_url, connect_args={"check_same_thread": False}
         )

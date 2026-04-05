@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import LoopObserver, LoopRecorder
+    from dendrux.loops.base import LoopNotifier, LoopRecorder
     from dendrux.strategies.base import Strategy
     from dendrux.types import AgentStep, LLMResponse
 
@@ -73,7 +73,7 @@ class SingleCall(Loop):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -101,7 +101,7 @@ class SingleCall(Loop):
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
         await record_message(recorder, user_msg, 0)
-        await notify_message(observer, user_msg, 0)
+        await notify_message(notifier, user_msg, 0)
 
         messages, _tools = strategy.build_messages(
             system_prompt=agent.prompt, history=history, tool_defs=[],
@@ -124,7 +124,7 @@ class SingleCall(Loop):
             duration_ms=llm_duration_ms,
         )
         await notify_llm(
-            observer, response, 1,
+            notifier, response, 1,
             semantic_messages=messages, semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
@@ -132,7 +132,7 @@ class SingleCall(Loop):
         assistant_msg = Message(role=Role.ASSISTANT, content=response.text or "")
         history.append(assistant_msg)
         await record_message(recorder, assistant_msg, 1)
-        await notify_message(observer, assistant_msg, 1)
+        await notify_message(notifier, assistant_msg, 1)
 
         usage = UsageStats(
             input_tokens=response.usage.input_tokens,
@@ -159,7 +159,7 @@ class SingleCall(Loop):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -192,7 +192,7 @@ class SingleCall(Loop):
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
         await record_message(recorder, user_msg, 0)
-        await notify_message(observer, user_msg, 0)
+        await notify_message(notifier, user_msg, 0)
 
         messages, _tools = strategy.build_messages(
             system_prompt=agent.prompt, history=history, tool_defs=[],
@@ -237,7 +237,7 @@ class SingleCall(Loop):
             duration_ms=llm_duration_ms,
         )
         await notify_llm(
-            observer, llm_response, 1,
+            notifier, llm_response, 1,
             semantic_messages=messages, semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
@@ -245,7 +245,7 @@ class SingleCall(Loop):
         assistant_msg = Message(role=Role.ASSISTANT, content=llm_response.text or "")
         history.append(assistant_msg)
         await record_message(recorder, assistant_msg, 1)
-        await notify_message(observer, assistant_msg, 1)
+        await notify_message(notifier, assistant_msg, 1)
 
         usage = UsageStats(
             input_tokens=llm_response.usage.input_tokens,

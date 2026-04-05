@@ -1,17 +1,16 @@
-"""Bridge observers for transport and composition.
+"""Bridge notifiers for transport and composition.
 
-CompositeObserver fans out to multiple observers (persistence + transport).
-TransportObserver pushes events to an asyncio.Queue for SSE consumption.
+TransportNotifier pushes events to an asyncio.Queue for SSE consumption.
 """
 
 from __future__ import annotations
 
 import asyncio  # noqa: TC003 — used at runtime in Queue type hints
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from dendrux.loops.base import LoopObserver
+from dendrux.loops.base import LoopNotifier
+from dendrux.notifiers.composite import CompositeNotifier
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,34 +18,20 @@ if TYPE_CHECKING:
     from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult
 
 
-logger = logging.getLogger(__name__)
-
-
-# CompositeObserver lives in dendrux.observers.composite (no bridge dependency).
-# Re-exported here for backward compatibility with bridge internals.
-from dendrux.observers.composite import CompositeObserver
-
-
 @dataclass
 class ServerEvent:
     """An event pushed to the SSE queue."""
 
-    event: str  # e.g., "run.started", "run.step", "run.paused", "run.completed"
+    event: str
     data: dict[str, Any] = field(default_factory=dict)
 
 
-class TransportObserver(LoopObserver):
+class TransportNotifier(LoopNotifier):
     """Pushes loop events onto an asyncio.Queue for SSE streaming.
-
-    The SSE endpoint reads from this queue and yields Server-Sent Events.
-    Terminal events (run.completed, run.error, run.paused) are also buffered
-    so late SSE subscribers can receive them.
 
     Args:
         queue: The asyncio.Queue to push events to.
-        redact: Optional redaction function. When provided, message content
-            is scrubbed before being pushed to the SSE queue — ensuring
-            the transport path has the same redaction posture as persistence.
+        redact: Optional redaction function applied to message content.
     """
 
     def __init__(
@@ -106,3 +91,6 @@ class TransportObserver(LoopObserver):
                 },
             )
         )
+
+
+__all__ = ["CompositeNotifier", "ServerEvent", "TransportNotifier"]

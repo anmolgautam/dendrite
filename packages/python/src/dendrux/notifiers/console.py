@@ -1,12 +1,12 @@
-"""Console observer — rich terminal output for agent runs.
+"""Console notifier — rich terminal output for agent runs.
 
-Opt-in observer that prints agent lifecycle events to the terminal
-using rich formatting. Plugs into the standard LoopObserver protocol.
+Opt-in notifier that prints agent lifecycle events to the terminal
+using rich formatting. Plugs into the standard LoopNotifier protocol.
 
 Usage:
-    from dendrux.observers.console import ConsoleObserver
+    from dendrux.notifiers.console import ConsoleNotifier
 
-    result = await agent.run("do the thing", observer=ConsoleObserver())
+    result = await agent.run("do the thing", notifier=ConsoleNotifier())
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dendrux.loops.base import LoopObserver
+from dendrux.loops.base import LoopNotifier
 from dendrux.types import Message, Role, ToolCall, ToolResult
 
 if TYPE_CHECKING:
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 _console = Console()
 
 
-class ConsoleObserver(LoopObserver):
-    """Rich terminal observer for agent runs.
+class ConsoleNotifier(LoopNotifier):
+    """Rich terminal notifier for agent runs.
 
     Args:
         show_llm_text: Show the LLM's final text content (default False).
@@ -56,13 +56,10 @@ class ConsoleObserver(LoopObserver):
 
     async def on_message_appended(self, message: Message, iteration: int) -> None:
         """Called when a message is appended to history."""
-        # Iteration header on change
         if iteration != self._iteration:
             self._iteration = iteration
             _console.print()
-            _console.print(
-                f"  [bold bright_cyan]Step {iteration}[/bold bright_cyan]"
-            )
+            _console.print(f"  [bold bright_cyan]Step {iteration}[/bold bright_cyan]")
 
         if message.role == Role.USER and iteration == 0:
             if not self._started:

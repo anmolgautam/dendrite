@@ -1,6 +1,6 @@
-"""Composite observer — fans out to multiple observers.
+"""Composite notifier — fans out to multiple notifiers.
 
-Lives in the core observers package (no bridge/transport dependency)
+Lives in the core notifiers package (no bridge/transport dependency)
 so it can be used in script-mode runs without requiring FastAPI.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from dendrux.loops.base import LoopObserver
+from dendrux.loops.base import LoopNotifier
 
 if TYPE_CHECKING:
     from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult
@@ -17,22 +17,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CompositeObserver(LoopObserver):
-    """Fans out loop events to multiple observers.
+class CompositeNotifier(LoopNotifier):
+    """Fans out loop events to multiple notifiers.
 
-    The loop sees one observer; CompositeObserver dispatches to all
-    registered observers. If one fails, the others still fire.
+    The loop sees one notifier; CompositeNotifier dispatches to all
+    registered notifiers. If one fails, the others still fire.
     """
 
-    def __init__(self, observers: list[LoopObserver]) -> None:
-        self._observers = list(observers)
+    def __init__(self, notifiers: list[LoopNotifier]) -> None:
+        self._notifiers = list(notifiers)
 
     async def on_message_appended(self, message: Message, iteration: int) -> None:
-        for obs in self._observers:
+        for notifier in self._notifiers:
             try:
-                await obs.on_message_appended(message, iteration)
+                await notifier.on_message_appended(message, iteration)
             except Exception:
-                logger.warning("CompositeObserver: on_message_appended failed", exc_info=True)
+                logger.warning("CompositeNotifier: on_message_appended failed", exc_info=True)
 
     async def on_llm_call_completed(
         self,
@@ -43,9 +43,9 @@ class CompositeObserver(LoopObserver):
         semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
     ) -> None:
-        for obs in self._observers:
+        for notifier in self._notifiers:
             try:
-                await obs.on_llm_call_completed(
+                await notifier.on_llm_call_completed(
                     response,
                     iteration,
                     semantic_messages=semantic_messages,
@@ -53,13 +53,13 @@ class CompositeObserver(LoopObserver):
                     duration_ms=duration_ms,
                 )
             except Exception:
-                logger.warning("CompositeObserver: on_llm_call_completed failed", exc_info=True)
+                logger.warning("CompositeNotifier: on_llm_call_completed failed", exc_info=True)
 
     async def on_tool_completed(
         self, tool_call: ToolCall, tool_result: ToolResult, iteration: int
     ) -> None:
-        for obs in self._observers:
+        for notifier in self._notifiers:
             try:
-                await obs.on_tool_completed(tool_call, tool_result, iteration)
+                await notifier.on_tool_completed(tool_call, tool_result, iteration)
             except Exception:
-                logger.warning("CompositeObserver: on_tool_completed failed", exc_info=True)
+                logger.warning("CompositeNotifier: on_tool_completed failed", exc_info=True)

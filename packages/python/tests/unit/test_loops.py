@@ -734,13 +734,13 @@ class TestReActLoopCostAccumulation:
 
 
 class TestReActLoopFinalMessagePersistence:
-    async def test_finish_notifies_observer_with_assistant_message(self) -> None:
-        """F-01: The final assistant message must be notified to the observer on Finish."""
-        from dendrux.loops.base import LoopObserver
+    async def test_finish_notifies_notifier_with_assistant_message(self) -> None:
+        """F-01: The final assistant message must be notified to the notifier on Finish."""
+        from dendrux.loops.base import LoopNotifier
 
         recorded_messages: list[Message] = []
 
-        class RecordingObserver(LoopObserver):
+        class RecordingNotifier(LoopNotifier):
             async def on_message_appended(self, message: Message, iteration: int) -> None:
                 recorded_messages.append(message)
 
@@ -758,7 +758,7 @@ class TestReActLoopFinalMessagePersistence:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="Question?",
-            observer=RecordingObserver(),
+            notifier=RecordingNotifier(),
         )
 
         assert result.status == RunStatus.SUCCESS
@@ -768,14 +768,14 @@ class TestReActLoopFinalMessagePersistence:
         assert recorded_messages[1].role == Role.ASSISTANT
         assert recorded_messages[1].content == "The answer is 42"
 
-    async def test_clarification_notifies_observer_with_assistant_message(self) -> None:
+    async def test_clarification_notifies_notifier_with_assistant_message(self) -> None:
         """F-03: The assistant message must be notified on Clarification too."""
-        from dendrux.loops.base import LoopObserver
+        from dendrux.loops.base import LoopNotifier
         from dendrux.strategies.base import Strategy
 
         recorded_messages: list[Message] = []
 
-        class RecordingObserver(LoopObserver):
+        class RecordingNotifier(LoopNotifier):
             async def on_message_appended(self, message: Message, iteration: int) -> None:
                 recorded_messages.append(message)
 
@@ -808,7 +808,7 @@ class TestReActLoopFinalMessagePersistence:
             provider=llm,
             strategy=ClarifyStrategy(),
             user_input="Do it",
-            observer=RecordingObserver(),
+            notifier=RecordingNotifier(),
         )
 
         assert result.status == RunStatus.WAITING_HUMAN_INPUT
@@ -819,11 +819,11 @@ class TestReActLoopFinalMessagePersistence:
 
     async def test_tool_call_then_finish_persists_all_messages(self) -> None:
         """Complete flow: tool call + finish should persist all messages including final."""
-        from dendrux.loops.base import LoopObserver
+        from dendrux.loops.base import LoopNotifier
 
         recorded_messages: list[Message] = []
 
-        class RecordingObserver(LoopObserver):
+        class RecordingNotifier(LoopNotifier):
             async def on_message_appended(self, message: Message, iteration: int) -> None:
                 recorded_messages.append(message)
 
@@ -847,7 +847,7 @@ class TestReActLoopFinalMessagePersistence:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="1+2?",
-            observer=RecordingObserver(),
+            notifier=RecordingNotifier(),
         )
 
         assert result.status == RunStatus.SUCCESS
@@ -858,16 +858,16 @@ class TestReActLoopFinalMessagePersistence:
 
 
 # ------------------------------------------------------------------
-# ReActLoop — observer warning surfacing (F-04)
+# ReActLoop — notifier warning surfacing (F-04)
 # ------------------------------------------------------------------
 
 
-class TestReActLoopObserverWarnings:
-    async def test_observer_failure_surfaces_in_meta(self) -> None:
-        """F-04: Observer exceptions should be captured in RunResult.meta, not silently lost."""
-        from dendrux.loops.base import LoopObserver
+class TestReActLoopNotifierWarnings:
+    async def test_notifier_failure_surfaces_in_meta(self) -> None:
+        """F-04: Notifier exceptions should be captured in RunResult.meta, not silently lost."""
+        from dendrux.loops.base import LoopNotifier
 
-        class FailingObserver(LoopObserver):
+        class FailingNotifier(LoopNotifier):
             async def on_message_appended(self, message: Message, iteration: int) -> None:
                 raise RuntimeError("DB connection lost")
 
@@ -885,21 +885,21 @@ class TestReActLoopObserverWarnings:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="Hi",
-            observer=FailingObserver(),
+            notifier=FailingNotifier(),
         )
 
         # Run should still succeed
         assert result.status == RunStatus.SUCCESS
         assert result.answer == "done"
         # But warnings should be surfaced
-        assert "observer_warnings" in result.meta
-        assert len(result.meta["observer_warnings"]) > 0
+        assert "notifier_warnings" in result.meta
+        assert len(result.meta["notifier_warnings"]) > 0
 
-    async def test_no_warnings_when_observer_healthy(self) -> None:
-        """No observer_warnings key when everything works fine."""
-        from dendrux.loops.base import LoopObserver
+    async def test_no_warnings_when_notifier_healthy(self) -> None:
+        """No notifier_warnings key when everything works fine."""
+        from dendrux.loops.base import LoopNotifier
 
-        class HealthyObserver(LoopObserver):
+        class HealthyNotifier(LoopNotifier):
             async def on_message_appended(self, message, iteration):
                 pass
 
@@ -917,11 +917,11 @@ class TestReActLoopObserverWarnings:
             provider=llm,
             strategy=NativeToolCalling(),
             user_input="Hi",
-            observer=HealthyObserver(),
+            notifier=HealthyNotifier(),
         )
 
         assert result.status == RunStatus.SUCCESS
-        assert "observer_warnings" not in result.meta
+        assert "notifier_warnings" not in result.meta
 
 
 # ------------------------------------------------------------------

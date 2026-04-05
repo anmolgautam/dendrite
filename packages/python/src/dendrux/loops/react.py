@@ -11,7 +11,7 @@ The core agent execution loop. Orchestrates the cycle of:
 The loop never touches provider-specific APIs or prompt formatting.
 It operates entirely on Dendrux's universal types.
 
-Observer hooks fire at three kinds of points:
+Notifier hooks fire at three kinds of points:
   - After each history.append() → on_message_appended
   - After provider.complete() → on_llm_call_completed
   - After _execute_tool() → on_tool_completed
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import LoopObserver, LoopRecorder
+    from dendrux.loops.base import LoopNotifier, LoopRecorder
     from dendrux.strategies.base import Strategy
     from dendrux.types import LLMResponse
 
@@ -99,7 +99,7 @@ async def _append_assistant(
     response: LLMResponse,
     history: list[Message],
     recorder: LoopRecorder | None,
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     iteration: int,
     warnings: list[str],
 ) -> Message:
@@ -111,7 +111,7 @@ async def _append_assistant(
     )
     history.append(msg)
     await _record_message(recorder, msg, iteration)
-    await _notify_message(observer, msg, iteration, warnings)
+    await _notify_message(notifier, msg, iteration, warnings)
     return msg
 
 
@@ -167,7 +167,7 @@ async def _init_loop_state(
     *,
     user_input: str,
     recorder: LoopRecorder | None,
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     initial_history: list[Message] | None,
     initial_steps: list[AgentStep] | None,
     initial_usage: UsageStats | None,
@@ -179,7 +179,7 @@ async def _init_loop_state(
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
         await _record_message(recorder, user_msg, 0)
-        await _notify_message(observer, user_msg, 0)
+        await _notify_message(notifier, user_msg, 0)
 
     call_counts: dict[str, int] = {}
     for msg in history:
@@ -210,7 +210,7 @@ async def _process_tool_calls(
     lookups: ToolLookups,
     strategy: Strategy,
     recorder: LoopRecorder | None,
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     iteration: int,
     history: list[Message],
     warnings: list[str],
@@ -245,11 +245,11 @@ async def _process_tool_calls(
                 error=limit_msg,
             )
             await _record_tool(recorder, tc, limit_result, iteration)
-            await _notify_tool(observer, tc, limit_result, iteration, warnings)
+            await _notify_tool(notifier, tc, limit_result, iteration, warnings)
             result_msg = strategy.format_tool_result(limit_result)
             history.append(result_msg)
             await _record_message(recorder, result_msg, iteration)
-            await _notify_message(observer, result_msg, iteration, warnings)
+            await _notify_message(notifier, result_msg, iteration, warnings)
             all_results.append((tc, limit_result))
         else:
             batch_counts[tc.name] = batch_counts.get(tc.name, 0) + 1
@@ -272,7 +272,7 @@ async def _process_tool_calls(
         if is_parallel and len(group) > 1:
             pairs = await asyncio.gather(*[
                 _execute_record_notify(
-                    tc, lookups, recorder, observer, iteration, warnings,
+                    tc, lookups, recorder, notifier, iteration, warnings,
                 )
                 for tc in group
             ])
@@ -281,7 +281,7 @@ async def _process_tool_calls(
             for tc in group:
                 tool_result = await _execute_tool(tc, lookups)
                 await _record_tool(recorder, tc, tool_result, iteration)
-                await _notify_tool(observer, tc, tool_result, iteration, warnings)
+                await _notify_tool(notifier, tc, tool_result, iteration, warnings)
                 executed.append((tc, tool_result))
 
     # --- Phase 4: Append history in original order (deterministic for LLM) ---
@@ -290,7 +290,7 @@ async def _process_tool_calls(
         result_msg = strategy.format_tool_result(tool_result)
         history.append(result_msg)
         await _record_message(recorder, result_msg, iteration)
-        await _notify_message(observer, result_msg, iteration, warnings)
+        await _notify_message(notifier, result_msg, iteration, warnings)
         all_results.append((tc, tool_result))
 
     return _ToolCallOutcome(all_results=all_results, pending_calls=pending_calls)
@@ -321,7 +321,7 @@ class ReActLoop(Loop):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -334,12 +334,12 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, recorder=recorder, observer=observer,
+            user_input=user_input, recorder=recorder, notifier=notifier,
             initial_history=initial_history, initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
         history, call_counts, steps = state.history, state.call_counts, state.steps
-        total_usage, observer_warnings = state.usage, state.warnings
+        total_usage, notifier_warnings = state.usage, state.warnings
 
         start_iteration = iteration_offset + 1
         end_iteration = agent.max_iterations + 1
@@ -357,7 +357,7 @@ class ReActLoop(Loop):
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
             )
             await _notify_llm(
-                observer, response, iteration, observer_warnings,
+                notifier, response, iteration, notifier_warnings,
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
             )
             _accumulate_usage(total_usage, response.usage)
@@ -367,9 +367,9 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Finish):
                 await _append_assistant(
-                    response, history, recorder, observer, iteration, observer_warnings,
+                    response, history, recorder, notifier, iteration, notifier_warnings,
                 )
-                meta = {"observer_warnings": observer_warnings} if observer_warnings else {}
+                meta = {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
                 return RunResult(
                     run_id=resolved_run_id, status=RunStatus.SUCCESS,
                     answer=step.action.answer, steps=steps,
@@ -378,15 +378,15 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Clarification):
                 await _append_assistant(
-                    response, history, recorder, observer, iteration, observer_warnings,
+                    response, history, recorder, notifier, iteration, notifier_warnings,
                 )
                 pause = _build_pause(
                     agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
                     history=history, steps=steps, iteration=iteration, usage=total_usage,
                 )
                 meta: dict[str, Any] = {"pause_state": pause}
-                if observer_warnings:
-                    meta["observer_warnings"] = observer_warnings
+                if notifier_warnings:
+                    meta["notifier_warnings"] = notifier_warnings
                 return RunResult(
                     run_id=resolved_run_id, status=RunStatus.WAITING_HUMAN_INPUT,
                     answer=step.action.question, steps=steps,
@@ -395,12 +395,12 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, ToolCall):
                 await _append_assistant(
-                    response, history, recorder, observer, iteration, observer_warnings,
+                    response, history, recorder, notifier, iteration, notifier_warnings,
                 )
                 outcome = await _process_tool_calls(
                     step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, recorder=recorder, observer=observer,
-                    iteration=iteration, history=history, warnings=observer_warnings,
+                    strategy=strategy, recorder=recorder, notifier=notifier,
+                    iteration=iteration, history=history, warnings=notifier_warnings,
                 )
                 if outcome.pending_calls:
                     pause = _build_pause(
@@ -409,15 +409,15 @@ class ReActLoop(Loop):
                         iteration=iteration, usage=total_usage,
                     )
                     meta = {"pause_state": pause}
-                    if observer_warnings:
-                        meta["observer_warnings"] = observer_warnings
+                    if notifier_warnings:
+                        meta["notifier_warnings"] = notifier_warnings
                     return RunResult(
                         run_id=resolved_run_id, status=RunStatus.WAITING_CLIENT_TOOL,
                         steps=steps, iteration_count=iteration,
                         usage=total_usage, meta=meta,
                     )
 
-        meta = {"observer_warnings": observer_warnings} if observer_warnings else {}
+        meta = {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
         return RunResult(
             run_id=resolved_run_id, status=RunStatus.MAX_ITERATIONS,
             steps=steps, iteration_count=agent.max_iterations,
@@ -433,7 +433,7 @@ class ReActLoop(Loop):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -452,12 +452,12 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, recorder=recorder, observer=observer,
+            user_input=user_input, recorder=recorder, notifier=notifier,
             initial_history=initial_history, initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
         history, call_counts, steps = state.history, state.call_counts, state.steps
-        total_usage, observer_warnings = state.usage, state.warnings
+        total_usage, notifier_warnings = state.usage, state.warnings
 
         start_iteration = iteration_offset + 1
         end_iteration = agent.max_iterations + 1
@@ -502,7 +502,7 @@ class ReActLoop(Loop):
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
             )
             await _notify_llm(
-                observer, llm_response, iteration, observer_warnings,
+                notifier, llm_response, iteration, notifier_warnings,
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
             )
             _accumulate_usage(total_usage, llm_response.usage)
@@ -512,10 +512,10 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Finish):
                 await _append_assistant(
-                    llm_response, history, recorder, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
                 )
                 meta: dict[str, Any] = (
-                    {"observer_warnings": observer_warnings} if observer_warnings else {}
+                    {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
                 )
                 yield RunEvent(
                     type=RunEventType.RUN_COMPLETED,
@@ -529,15 +529,15 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Clarification):
                 await _append_assistant(
-                    llm_response, history, recorder, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
                 )
                 pause = _build_pause(
                     agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
                     history=history, steps=steps, iteration=iteration, usage=total_usage,
                 )
                 meta = {"pause_state": pause}
-                if observer_warnings:
-                    meta["observer_warnings"] = observer_warnings
+                if notifier_warnings:
+                    meta["notifier_warnings"] = notifier_warnings
                 yield RunEvent(
                     type=RunEventType.RUN_PAUSED,
                     run_result=RunResult(
@@ -550,12 +550,12 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, ToolCall):
                 await _append_assistant(
-                    llm_response, history, recorder, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
                 )
                 outcome = await _process_tool_calls(
                     step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, recorder=recorder, observer=observer,
-                    iteration=iteration, history=history, warnings=observer_warnings,
+                    strategy=strategy, recorder=recorder, notifier=notifier,
+                    iteration=iteration, history=history, warnings=notifier_warnings,
                 )
                 for tc, tool_result in outcome.all_results:
                     yield RunEvent(
@@ -569,8 +569,8 @@ class ReActLoop(Loop):
                         iteration=iteration, usage=total_usage,
                     )
                     meta = {"pause_state": pause}
-                    if observer_warnings:
-                        meta["observer_warnings"] = observer_warnings
+                    if notifier_warnings:
+                        meta["notifier_warnings"] = notifier_warnings
                     yield RunEvent(
                         type=RunEventType.RUN_PAUSED,
                         run_result=RunResult(
@@ -581,7 +581,7 @@ class ReActLoop(Loop):
                     )
                     return
 
-        meta = {"observer_warnings": observer_warnings} if observer_warnings else {}
+        meta = {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
         yield RunEvent(
             type=RunEventType.RUN_COMPLETED,
             run_result=RunResult(
@@ -671,9 +671,9 @@ async def _execute_record_notify(
     tool_call: ToolCall,
     lookups: ToolLookups,
     recorder: LoopRecorder | None,
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     iteration: int,
-    observer_warnings: list[str],
+    notifier_warnings: list[str],
 ) -> tuple[ToolCall, ToolResult]:
     """Execute a tool, record, then notify — for parallel execution.
 
@@ -682,7 +682,7 @@ async def _execute_record_notify(
     """
     result = await _execute_tool(tool_call, lookups)
     await _record_tool(recorder, tool_call, result, iteration)
-    await _notify_tool(observer, tool_call, result, iteration, observer_warnings)
+    await _notify_tool(notifier, tool_call, result, iteration, notifier_warnings)
     return tool_call, result
 
 

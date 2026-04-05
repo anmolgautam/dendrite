@@ -9,7 +9,7 @@ the strategy's job. The loop is pure orchestration.
 
 Two event seams:
   - LoopRecorder: internal, authoritative persistence. Fail-closed.
-  - LoopObserver: external, best-effort notifications. Exceptions swallowed.
+  - LoopNotifier: external, best-effort notifications. Exceptions swallowed.
 """
 
 from __future__ import annotations
@@ -78,14 +78,14 @@ class LoopRecorder(Protocol):
 
 
 @runtime_checkable
-class LoopObserver(Protocol):
-    """Observer for loop events — best-effort notification hook.
+class LoopNotifier(Protocol):
+    """Notifier for loop events — best-effort notification hook.
 
     The loop fires these callbacks at the exact points where history mutates
     and provider.complete() returns. Implementations decide what to do:
     log, emit metrics, stream to SSE, print to console, etc.
 
-    Failure policy: observers should not raise. If they do, the loop logs
+    Failure policy: notifiers should not raise. If they do, the loop logs
     a warning and continues execution. Notification failures must not
     kill agent runs.
     """
@@ -149,7 +149,7 @@ class Loop(ABC):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -165,7 +165,7 @@ class Loop(ABC):
             user_input: The user's input to process.
             run_id: Optional runner-provided ID. If None, loop generates one.
             recorder: Internal persistence hooks (fail-closed).
-            observer: Optional observer for best-effort notifications.
+            notifier: Optional notifier for best-effort notifications.
             initial_history: Pre-existing conversation history for resume.
                 When provided, skips creating the user message and uses
                 this as the starting history.
@@ -191,7 +191,7 @@ class Loop(ABC):
         user_input: str,
         run_id: str | None = None,
         recorder: LoopRecorder | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
         iteration_offset: int = 0,
@@ -223,7 +223,7 @@ class Loop(ABC):
             user_input=user_input,
             run_id=run_id,
             recorder=recorder,
-            observer=observer,
+            notifier=notifier,
             initial_history=initial_history,
             initial_steps=initial_steps,
             iteration_offset=iteration_offset,

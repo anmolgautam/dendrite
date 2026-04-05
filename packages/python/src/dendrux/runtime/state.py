@@ -6,7 +6,7 @@ backend. The default implementation uses SQLAlchemy async (SQLite/Postgres).
 Usage:
     store = SQLAlchemyStateStore(engine)
     run_id = await store.create_run(...)
-    # ... loop runs with observer writing traces/tool_calls/usage ...
+    # ... loop runs with recorder writing traces/tool_calls/usage ...
     await store.finalize_run(run_id, status=..., answer=..., ...)
 """
 

@@ -5,7 +5,7 @@ Two seams with different failure contracts:
   record_* — call LoopRecorder (internal persistence). Exceptions PROPAGATE.
              If persistence fails, the run stops.
 
-  notify_* — call LoopObserver (best-effort notifications). Exceptions SWALLOWED.
+  notify_* — call LoopNotifier (best-effort notifications). Exceptions SWALLOWED.
              Console printing, Slack, SSE — if they fail, the run continues.
 
 At each event point, the loop calls record first, then notify.
@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from dendrux.loops.base import LoopObserver, LoopRecorder
+    from dendrux.loops.base import LoopNotifier, LoopRecorder
     from dendrux.types import LLMResponse, Message, ToolCall, ToolDef, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -73,29 +73,29 @@ async def record_tool(
 
 
 # ------------------------------------------------------------------
-# Observer helpers — best-effort (exceptions swallowed)
+# Notifier helpers — best-effort (exceptions swallowed)
 # ------------------------------------------------------------------
 
 
 async def notify_message(
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     message: Message,
     iteration: int,
     warnings: list[str] | None = None,
 ) -> None:
-    """Notify observer of a message append, swallowing exceptions."""
-    if observer is None:
+    """Notify notifier of a message append, swallowing exceptions."""
+    if notifier is None:
         return
     try:
-        await observer.on_message_appended(message, iteration)
+        await notifier.on_message_appended(message, iteration)
     except Exception:
-        logger.warning("Observer.on_message_appended failed", exc_info=True)
+        logger.warning("Notifier.on_message_appended failed", exc_info=True)
         if warnings is not None:
             warnings.append(f"on_message_appended failed at iteration {iteration}")
 
 
 async def notify_llm(
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     response: LLMResponse,
     iteration: int,
     warnings: list[str] | None = None,
@@ -104,11 +104,11 @@ async def notify_llm(
     semantic_tools: list[ToolDef] | None = None,
     duration_ms: int | None = None,
 ) -> None:
-    """Notify observer of an LLM call completion, swallowing exceptions."""
-    if observer is None:
+    """Notify notifier of an LLM call completion, swallowing exceptions."""
+    if notifier is None:
         return
     try:
-        await observer.on_llm_call_completed(
+        await notifier.on_llm_call_completed(
             response,
             iteration,
             semantic_messages=semantic_messages,
@@ -116,24 +116,24 @@ async def notify_llm(
             duration_ms=duration_ms,
         )
     except Exception:
-        logger.warning("Observer.on_llm_call_completed failed", exc_info=True)
+        logger.warning("Notifier.on_llm_call_completed failed", exc_info=True)
         if warnings is not None:
             warnings.append(f"on_llm_call_completed failed at iteration {iteration}")
 
 
 async def notify_tool(
-    observer: LoopObserver | None,
+    notifier: LoopNotifier | None,
     tool_call: ToolCall,
     tool_result: ToolResult,
     iteration: int,
     warnings: list[str] | None = None,
 ) -> None:
-    """Notify observer of a tool completion, swallowing exceptions."""
-    if observer is None:
+    """Notify notifier of a tool completion, swallowing exceptions."""
+    if notifier is None:
         return
     try:
-        await observer.on_tool_completed(tool_call, tool_result, iteration)
+        await notifier.on_tool_completed(tool_call, tool_result, iteration)
     except Exception:
-        logger.warning("Observer.on_tool_completed failed", exc_info=True)
+        logger.warning("Notifier.on_tool_completed failed", exc_info=True)
         if warnings is not None:
             warnings.append(f"on_tool_completed failed at iteration {iteration}")

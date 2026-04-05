@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import Loop, LoopObserver
+    from dendrux.loops.base import Loop, LoopNotifier
     from dendrux.runtime.state import StateStore
     from dendrux.types import RunResult, RunStream, ToolDef, ToolResult
 
@@ -366,7 +366,7 @@ class Agent:
         *,
         tenant_id: str | None = ...,
         metadata: dict[str, Any] | None = ...,
-        observer: LoopObserver | None = ...,
+        notifier: LoopNotifier | None = ...,
         max_delegation_depth: int | None,
         **kwargs: Any,
     ) -> RunResult: ...
@@ -378,7 +378,7 @@ class Agent:
         *,
         tenant_id: str | None = ...,
         metadata: dict[str, Any] | None = ...,
-        observer: LoopObserver | None = ...,
+        notifier: LoopNotifier | None = ...,
         **kwargs: Any,
     ) -> RunResult: ...
 
@@ -388,7 +388,7 @@ class Agent:
         *,
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         max_delegation_depth: int | None | _UnsetType = _UNSET,
         **kwargs: Any,
     ) -> RunResult:
@@ -401,9 +401,9 @@ class Agent:
             user_input: The user's input to process.
             tenant_id: Optional tenant ID for multi-tenant isolation.
             metadata: Optional developer linking data (thread_id, user_id, etc.).
-            observer: Optional observer for lifecycle events (e.g. ConsoleObserver
-                for terminal output, custom observers for Slack/Telegram/etc.).
-                Composed with PersistenceObserver internally if persistence is enabled.
+            notifier: Optional notifier for lifecycle events (e.g. ConsoleNotifier
+                for terminal output, custom notifiers for Slack/Telegram/etc.).
+                Composed with PersistenceRecorder internally if persistence is enabled.
             max_delegation_depth: Maximum allowed delegation depth for the run
                 tree. Default 10. None means unbounded. Child runs inherit
                 this limit automatically.
@@ -437,7 +437,7 @@ class Agent:
             tenant_id=tenant_id,
             metadata=metadata,
             redact=self._redact,
-            extra_observer=observer,
+            extra_notifier=notifier,
             **run_kwargs,
             **kwargs,
         )
@@ -448,7 +448,7 @@ class Agent:
         *,
         tool_results: list[ToolResult] | None = None,
         user_input: str | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
     ) -> RunResult:
         """Resume a paused run.
 
@@ -460,8 +460,8 @@ class Agent:
             run_id: The paused run's ID.
             tool_results: Results for pending tool calls (for client tool runs).
             user_input: Clarification answer (for human-in-the-loop runs).
-            observer: Optional additional loop observer (e.g. TransportObserver
-                for SSE streaming). Composed with PersistenceObserver internally.
+            notifier: Optional additional loop notifier (e.g. TransportNotifier
+                for SSE streaming). Composed with PersistenceRecorder internally.
 
         Returns:
             RunResult with updated status.
@@ -498,7 +498,7 @@ class Agent:
                 agent=self,
                 provider=provider,
                 redact=self._redact,
-                extra_observer=observer,
+                extra_notifier=notifier,
             )
         # user_input path (guarded by validation above)
         return await resume_with_input(
@@ -508,7 +508,7 @@ class Agent:
             agent=self,
             provider=provider,
             redact=self._redact,
-            extra_observer=observer,
+            extra_notifier=notifier,
         )
 
     @overload
@@ -518,7 +518,7 @@ class Agent:
         *,
         tenant_id: str | None = ...,
         metadata: dict[str, Any] | None = ...,
-        observer: LoopObserver | None = ...,
+        notifier: LoopNotifier | None = ...,
         max_delegation_depth: int | None,
         **kwargs: Any,
     ) -> RunStream: ...
@@ -530,7 +530,7 @@ class Agent:
         *,
         tenant_id: str | None = ...,
         metadata: dict[str, Any] | None = ...,
-        observer: LoopObserver | None = ...,
+        notifier: LoopNotifier | None = ...,
         **kwargs: Any,
     ) -> RunStream: ...
 
@@ -540,7 +540,7 @@ class Agent:
         *,
         tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
         max_delegation_depth: int | None | _UnsetType = _UNSET,
         **kwargs: Any,
     ) -> RunStream:
@@ -548,7 +548,7 @@ class Agent:
 
         Same parameters as run(). Returns a RunStream immediately —
         no ``await`` needed. The run_id is available before iteration.
-        Async setup (DB row, observers) runs lazily on first iteration.
+        Async setup (DB row, notifiers) runs lazily on first iteration.
 
         Usage:
             # Full event stream
@@ -572,7 +572,7 @@ class Agent:
             user_input: The user's input to process.
             tenant_id: Optional tenant ID for multi-tenant isolation.
             metadata: Optional developer linking data (thread_id, user_id, etc.).
-            observer: Optional observer for lifecycle events.
+            notifier: Optional notifier for lifecycle events.
             max_delegation_depth: Maximum allowed delegation depth for the run
                 tree. Default 10. None means unbounded.
             **kwargs: Forwarded to the LLM provider (temperature, max_tokens, etc.).
@@ -601,7 +601,7 @@ class Agent:
             tenant_id=tenant_id,
             metadata=metadata,
             redact=self._redact,
-            extra_observer=observer,
+            extra_notifier=notifier,
             **stream_kwargs,
             **kwargs,
         )
@@ -612,7 +612,7 @@ class Agent:
         *,
         tool_results: list[ToolResult] | None = None,
         user_input: str | None = None,
-        observer: LoopObserver | None = None,
+        notifier: LoopNotifier | None = None,
     ) -> RunStream:
         """Stream a resumed run as RunEvents.
 
@@ -633,7 +633,7 @@ class Agent:
             run_id: The paused run's ID.
             tool_results: Results for pending tool calls (client tool runs).
             user_input: Clarification answer (human-in-the-loop runs).
-            observer: Optional additional loop observer.
+            notifier: Optional additional loop notifier.
 
         Returns:
             RunStream — async iterable of RunEvent objects.
@@ -659,7 +659,7 @@ class Agent:
             tool_results=tool_results,
             user_input=user_input,
             redact=self._redact,
-            extra_observer=observer,
+            extra_notifier=notifier,
         )
 
     # ------------------------------------------------------------------

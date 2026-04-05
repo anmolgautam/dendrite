@@ -12,7 +12,7 @@ Sprint 2 adds optional state_store for persistence. When provided:
   - Runner owns the run_id (generates it, passes to loop)
   - PersistenceRecorder records traces, tool calls, and usage (fail-closed)
   - finalize_run() is called in try/finally to guarantee persistence
-  - Developer's extra_observer is passed separately (best-effort)
+  - Developer's extra_notifier is passed separately (best-effort)
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import Loop, LoopObserver, LoopRecorder
+    from dendrux.loops.base import Loop, LoopNotifier, LoopRecorder
     from dendrux.runtime.state import StateStore
     from dendrux.strategies.base import Strategy
     from dendrux.types import Message, RunEvent, RunResult, RunStream, ToolResult
@@ -164,7 +164,7 @@ async def run(
     tenant_id: str | None = ...,
     metadata: dict[str, Any] | None = ...,
     redact: Callable[[str], str] | None = ...,
-    extra_observer: LoopObserver | None = ...,
+    extra_notifier: LoopNotifier | None = ...,
     max_delegation_depth: int | None,
     **kwargs: Any,
 ) -> RunResult: ...
@@ -182,7 +182,7 @@ async def run(
     tenant_id: str | None = ...,
     metadata: dict[str, Any] | None = ...,
     redact: Callable[[str], str] | None = ...,
-    extra_observer: LoopObserver | None = ...,
+    extra_notifier: LoopNotifier | None = ...,
     **kwargs: Any,
 ) -> RunResult: ...
 
@@ -198,7 +198,7 @@ async def run(
     tenant_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
     max_delegation_depth: int | None | _UnsetType = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunResult:
@@ -222,6 +222,8 @@ async def run(
         redact: Optional string scrubber applied to all persisted content
             (trace text, tool params, result payloads, error messages).
             Receives a plain string, must return a plain string.
+        extra_notifier: Optional additional LoopNotifier for best-effort
+            notifications (e.g. ConsoleNotifier, TransportNotifier for SSE).
         max_delegation_depth: Maximum allowed delegation depth for the
             run tree. Default 10. None means unbounded. Propagated to
             all child runs via contextvar. Raises DelegationDepthExceededError
@@ -331,7 +333,7 @@ async def run(
             user_input=user_input,
             run_id=run_id,
             recorder=recorder,
-            observer=extra_observer,
+            notifier=extra_notifier,
             provider_kwargs=provider_kwargs or None,
         )
 
@@ -429,7 +431,7 @@ def run_stream(
     tenant_id: str | None = ...,
     metadata: dict[str, Any] | None = ...,
     redact: Callable[[str], str] | None = ...,
-    extra_observer: LoopObserver | None = ...,
+    extra_notifier: LoopNotifier | None = ...,
     max_delegation_depth: int | None,
     **kwargs: Any,
 ) -> RunStream: ...
@@ -448,7 +450,7 @@ def run_stream(
     tenant_id: str | None = ...,
     metadata: dict[str, Any] | None = ...,
     redact: Callable[[str], str] | None = ...,
-    extra_observer: LoopObserver | None = ...,
+    extra_notifier: LoopNotifier | None = ...,
     **kwargs: Any,
 ) -> RunStream: ...
 
@@ -465,14 +467,14 @@ def run_stream(
     tenant_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
     max_delegation_depth: int | None | _UnsetType = _UNSET_DEPTH,
     **kwargs: Any,
 ) -> RunStream:
     """Stream an agent run as RunEvents, returning a RunStream.
 
     Synchronous — returns immediately with run_id available. All async
-    setup (DB row, observers) runs lazily on first iteration.
+    setup (DB row, notifiers) runs lazily on first iteration.
 
     Accepts either an already-resolved ``state_store`` or an async
     ``state_store_resolver`` callable. The resolver is called once in
@@ -518,7 +520,7 @@ def run_stream(
         """Inner generator — lazy async setup, then loop stream with lifecycle.
 
         The entire body is wrapped in try/except so that setup failures
-        (state_store_resolver, create_run, observer init) are also caught
+        (state_store_resolver, create_run, notifier init) are also caught
         and yielded as RUN_ERROR — honoring the "no exception to consumer" contract.
         """
         # store is captured in the closure for the error handler.
@@ -606,7 +608,7 @@ def run_stream(
                 user_input=user_input,
                 run_id=run_id,
                 recorder=recorder,
-                observer=extra_observer,
+                notifier=extra_notifier,
                 provider_kwargs=provider_kwargs or None,
             ):
                 # Persist loop outcomes before forwarding
@@ -743,7 +745,7 @@ async def resume(
     strategy: Strategy | None = None,
     loop: Loop | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
 ) -> RunResult:
     """Resume a paused run by providing client tool results.
 
@@ -760,7 +762,7 @@ async def resume(
         strategy: Strategy override. Defaults to NativeToolCalling.
         loop: Loop override. Defaults to ReActLoop.
         redact: Redaction policy for persistence.
-        extra_observer: Optional additional observer for SSE streaming.
+        extra_notifier: Optional additional notifier for SSE streaming.
     """
     return await _resume_core(
         run_id,
@@ -772,7 +774,7 @@ async def resume(
         redact=redact,
         expected_status=RunStatus.WAITING_CLIENT_TOOL.value,
         tool_results=tool_results,
-        extra_observer=extra_observer,
+        extra_notifier=extra_notifier,
     )
 
 
@@ -786,7 +788,7 @@ async def resume_with_input(
     strategy: Strategy | None = None,
     loop: Loop | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
 ) -> RunResult:
     """Resume a paused run by providing clarification input.
 
@@ -802,7 +804,7 @@ async def resume_with_input(
         strategy: Strategy override. Defaults to NativeToolCalling.
         loop: Loop override. Defaults to ReActLoop.
         redact: Redaction policy for persistence.
-        extra_observer: Optional additional observer for SSE streaming.
+        extra_notifier: Optional additional notifier for SSE streaming.
     """
     return await _resume_core(
         run_id,
@@ -814,7 +816,7 @@ async def resume_with_input(
         redact=redact,
         expected_status=RunStatus.WAITING_HUMAN_INPUT.value,
         user_input=user_input,
-        extra_observer=extra_observer,
+        extra_notifier=extra_notifier,
     )
 
 
@@ -827,7 +829,7 @@ class _ResumeContext:
     """
 
     __slots__ = (
-        "history", "recorder", "observer", "sequencer", "pause_state",
+        "history", "recorder", "notifier", "sequencer", "pause_state",
         "resolved_loop", "resolved_strategy",
     )
 
@@ -836,7 +838,7 @@ class _ResumeContext:
         *,
         history: list[Message],
         recorder: LoopRecorder,
-        observer: LoopObserver | None,
+        notifier: LoopNotifier | None,
         sequencer: EventSequencer,
         pause_state: PauseState,
         resolved_loop: Loop,
@@ -844,7 +846,7 @@ class _ResumeContext:
     ) -> None:
         self.history = history
         self.recorder = recorder
-        self.observer = observer
+        self.notifier = notifier
         self.sequencer = sequencer
         self.pause_state = pause_state
         self.resolved_loop = resolved_loop
@@ -864,7 +866,7 @@ async def _prepare_resume(
     expected_status: str,
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
 ) -> _ResumeContext:
     """Build everything needed to re-enter the loop after a resume.
 
@@ -938,7 +940,7 @@ async def _prepare_resume(
 
     # 5. Record + notify injected messages and tool completions
     #    Recorder is fail-closed (exceptions propagate).
-    #    Observer is best-effort (swallowed via notify helpers).
+    #    Notifier is best-effort (swallowed via notify helpers).
     from dendrux.loops._helpers import notify_message as _notify_msg
     from dendrux.loops._helpers import notify_tool as _notify_tool
 
@@ -950,17 +952,17 @@ async def _prepare_resume(
             tc = pending_by_id[tr.call_id]
             await recorder.on_message_appended(msg, pause_state.iteration)
             await recorder.on_tool_completed(tc, tr, pause_state.iteration)
-            await _notify_msg(extra_observer, msg, pause_state.iteration)
-            await _notify_tool(extra_observer, tc, tr, pause_state.iteration)
+            await _notify_msg(extra_notifier, msg, pause_state.iteration)
+            await _notify_tool(extra_notifier, tc, tr, pause_state.iteration)
     elif user_input is not None:
         msg = history[-1]
         await recorder.on_message_appended(msg, pause_state.iteration)
-        await _notify_msg(extra_observer, msg, pause_state.iteration)
+        await _notify_msg(extra_notifier, msg, pause_state.iteration)
 
     return _ResumeContext(
         history=history,
         recorder=recorder,
-        observer=extra_observer,
+        notifier=extra_notifier,
         sequencer=sequencer,
         pause_state=pause_state,
         resolved_loop=resolved_loop,
@@ -980,15 +982,15 @@ async def _resume_core(
     expected_status: str,
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
     _skip_claim: bool = False,
 ) -> RunResult:
     """Shared resume logic for tool results and clarification input.
 
     Args:
-        extra_observer: Optional additional LoopObserver (e.g. TransportObserver)
+        extra_notifier: Optional additional LoopNotifier (e.g. TransportNotifier)
             for SSE streaming during resume. Passed separately from the
-            PersistenceRecorder — recorder handles persistence, observer handles
+            PersistenceRecorder — recorder handles persistence, notifier handles
             notifications.
         _skip_claim: Internal flag — skip the atomic claim step when the caller
             has already claimed via submit_and_claim(). Used by resume_claimed().
@@ -1026,7 +1028,7 @@ async def _resume_core(
                 f"cannot resume. It may have been claimed by another caller."
             )
 
-    # 4-8. Prepare history, observer, sequencer (shared with resume_stream)
+    # 4-8. Prepare history, notifier, sequencer (shared with resume_stream)
     ctx = await _prepare_resume(
         run_id,
         pause_state,
@@ -1039,7 +1041,7 @@ async def _resume_core(
         expected_status=expected_status,
         tool_results=tool_results,
         user_input=user_input,
-        extra_observer=extra_observer,
+        extra_notifier=extra_notifier,
     )
 
     # 9. Set delegation context — resumed run is the active parent for any
@@ -1071,7 +1073,7 @@ async def _resume_core(
             user_input="",
             run_id=run_id,
             recorder=ctx.recorder,
-            observer=ctx.observer,
+            notifier=ctx.notifier,
             initial_history=ctx.history,
             initial_steps=ctx.pause_state.steps,
             iteration_offset=ctx.pause_state.iteration,
@@ -1156,7 +1158,7 @@ def resume_stream(
     tool_results: list[ToolResult] | None = None,
     user_input: str | None = None,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
 ) -> RunStream:
     """Stream a resumed run as RunEvents, returning a RunStream.
 
@@ -1226,7 +1228,7 @@ def resume_stream(
                     f"cannot resume. It may have been claimed by another caller."
                 )
 
-            # 5. Prepare (shared helper — history, observer, sequencer)
+            # 5. Prepare (shared helper — history, notifier, sequencer)
             ctx = await _prepare_resume(
                 run_id,
                 pause_state,
@@ -1237,7 +1239,7 @@ def resume_stream(
                 expected_status=expected,
                 tool_results=tool_results,
                 user_input=user_input,
-                extra_observer=extra_observer,
+                extra_notifier=extra_notifier,
             )
             _shared["sequencer"] = ctx.sequencer
 
@@ -1271,7 +1273,7 @@ def resume_stream(
                 user_input="",
                 run_id=run_id,
                 recorder=ctx.recorder,
-                observer=ctx.observer,
+                notifier=ctx.notifier,
                 initial_history=ctx.history,
                 initial_steps=ctx.pause_state.steps,
                 iteration_offset=ctx.pause_state.iteration,
@@ -1399,7 +1401,7 @@ async def resume_claimed(
     agent: Agent,
     provider: LLMProvider,
     redact: Callable[[str], str] | None = None,
-    extra_observer: LoopObserver | None = None,
+    extra_notifier: LoopNotifier | None = None,
 ) -> RunResult:
     """Resume a run that was already claimed via submit_and_claim().
 
@@ -1420,7 +1422,7 @@ async def resume_claimed(
         agent: Agent definition.
         provider: LLM provider.
         redact: Optional redaction policy.
-        extra_observer: Optional TransportObserver for SSE streaming.
+        extra_notifier: Optional TransportNotifier for SSE streaming.
 
     Returns:
         RunResult from the resumed loop.
@@ -1482,7 +1484,7 @@ async def resume_claimed(
             redact=redact,
             expected_status="running",
             tool_results=tool_results,
-            extra_observer=extra_observer,
+            extra_notifier=extra_notifier,
             _skip_claim=True,
         )
 
@@ -1495,7 +1497,7 @@ async def resume_claimed(
             redact=redact,
             expected_status="running",
             user_input=submitted_input,
-            extra_observer=extra_observer,
+            extra_notifier=extra_notifier,
             _skip_claim=True,
         )
 

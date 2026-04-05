@@ -2,7 +2,7 @@
 
 Covers:
   - LLMResponse provider payload fields
-  - Observer enriched on_llm_call_completed with semantic payloads + dual-write
+  - Recorder enriched on_llm_call_completed with semantic payloads + dual-write
   - _resume_core CAS bug fix
   - Dashboard /api/runs/{run_id}/llm-calls endpoint
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from dendrux.runtime.observer import PersistenceObserver
+from dendrux.runtime.persistence import PersistenceRecorder
 from dendrux.types import (
     LLMResponse,
     Message,
@@ -75,15 +75,15 @@ class TestLLMResponseProviderPayloads:
 
 
 # ------------------------------------------------------------------
-# Observer: enriched on_llm_call_completed
+# Recorder: enriched on_llm_call_completed
 # ------------------------------------------------------------------
 
 
-class TestObserverLLMInteraction:
+class TestRecorderLLMInteraction:
     async def test_dual_write_to_both_tables(self) -> None:
         """on_llm_call_completed writes to llm_interactions AND token_usage."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
+        obs = PersistenceRecorder(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
 
         response = LLMResponse(
             text="hello",
@@ -96,7 +96,7 @@ class TestObserverLLMInteraction:
 
     async def test_llm_interaction_has_usage(self) -> None:
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
+        obs = PersistenceRecorder(store, "run_1", model="claude-sonnet", provider_name="Anthropic")
 
         response = LLMResponse(
             text="hi",
@@ -113,7 +113,7 @@ class TestObserverLLMInteraction:
     async def test_semantic_request_full_fidelity(self) -> None:
         """Semantic request preserves full Message structure and ToolDef schemas."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="add", params={"a": 1}, provider_tool_call_id="p1")
         messages = [
@@ -157,7 +157,7 @@ class TestObserverLLMInteraction:
     async def test_semantic_response_full_fidelity(self) -> None:
         """Semantic response preserves full text, tool_calls with IDs, and usage."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         tc = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="ptc_1")
         response = LLMResponse(
@@ -184,7 +184,7 @@ class TestObserverLLMInteraction:
     async def test_provider_payloads_passed_through(self) -> None:
         """provider_request and provider_response from LLMResponse are stored."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         response = LLMResponse(
             text="hi",
@@ -199,9 +199,9 @@ class TestObserverLLMInteraction:
         assert rec["provider_response"]["id"] == "msg_abc"
 
     async def test_duration_ms_passed_through(self) -> None:
-        """duration_ms kwarg flows from loop → observer → save_llm_interaction."""
+        """duration_ms kwarg flows from loop → recorder → save_llm_interaction."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         response = LLMResponse(text="hi", usage=UsageStats())
         await obs.on_llm_call_completed(response, iteration=1, duration_ms=1420)
@@ -212,7 +212,7 @@ class TestObserverLLMInteraction:
     async def test_no_semantic_payloads_when_not_provided(self) -> None:
         """When called without semantic args (backcompat), payloads are None."""
         store = MockStateStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         response = LLMResponse(text="hi", usage=UsageStats())
         await obs.on_llm_call_completed(response, iteration=1)
@@ -230,7 +230,7 @@ class TestObserverLLMInteraction:
                 raise RuntimeError("DB error")
 
         store = FailingInteractionStore()
-        obs = PersistenceObserver(store, "run_1")
+        obs = PersistenceRecorder(store, "run_1")
 
         response = LLMResponse(text="hi", usage=UsageStats())
         await obs.on_llm_call_completed(response, iteration=1)
