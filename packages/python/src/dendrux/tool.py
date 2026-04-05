@@ -37,7 +37,6 @@ DEFAULT_TOOL_TIMEOUT = 120.0
 def tool(
     target: ToolTarget | str = ToolTarget.SERVER,
     parallel: bool = True,
-    priority: int = 0,
     max_calls_per_run: int | None = None,
     timeout_seconds: float = _SENTINEL,
 ) -> Callable[..., Any]:
@@ -46,7 +45,6 @@ def tool(
     Args:
         target: Where the tool runs — "server" (default) or "client".
         parallel: Whether concurrent execution is allowed (default True).
-        priority: Reserved — not enforced.
         max_calls_per_run: Maximum calls per run. None = unlimited.
         timeout_seconds: Execution timeout in seconds. Default 120s.
 
@@ -83,7 +81,6 @@ def tool(
             parameters=schema,
             target=resolved_target,
             parallel=parallel,
-            priority=priority,
             max_calls_per_run=max_calls_per_run,
             timeout_seconds=resolved_timeout,
             has_explicit_timeout=explicit_timeout,

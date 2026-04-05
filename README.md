@@ -1,29 +1,22 @@
 # 🌿 Dendrux
 
-The Python framework for building agents that use tools, persist state, and pause for human input.
+The async Python runtime for agents that survive failure, persist everything, and bridge to the real world.
 
-> 🧪 **Research project** — built with [Claude Code](https://claude.ai/code) and [Codex](https://openai.com/codex). This is an actively developed research repo, not a production-hardened library. APIs may change. Use it to learn, experiment, and build — but evaluate carefully before depending on it in production.
+[![CI](https://github.com/dendrux/dendrux/actions/workflows/ci.yml/badge.svg)](https://github.com/dendrux/dendrux/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
-## 📦 Install
+> `v0.1.0a3` — core API stabilizing, actively developed.
 
-```bash
-pip install "dendrux[all]"            # everything (Anthropic + OpenAI + DB + bridge)
-pip install "dendrux[anthropic,db]"   # just Anthropic + SQLite
-pip install "dendrux[openai,db]"      # just OpenAI + SQLite
-```
+---
 
-<details>
-<summary>Development install (from source)</summary>
+## Why Dendrux?
 
-```bash
-git clone https://github.com/dendrux/dendrux.git
-cd dendrux/packages/python
-pip install -e ".[dev,all]"
-```
+Agent frameworks assume tools run on the server and finish instantly. Real agents crash mid-run, need human approval, interact with browsers and spreadsheets, and must explain what they did after the fact.
 
-</details>
+Dendrux is the runtime that handles this. Tools are plain Python functions. State survives restarts. Crashed runs get swept. Failed runs retry with prior context reconstructed from persisted traces (exact when no redaction is configured; approximate if redaction scrubs sensitive content). And every LLM call, tool execution, pause, and failure is persisted as evidence.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```python
 import asyncio
@@ -51,165 +44,84 @@ asyncio.run(main())
 ANTHROPIC_API_KEY=sk-... python my_agent.py
 ```
 
-That's it. Tools are plain Python functions. The agent calls them, reasons about results, and returns an answer.
+Three concepts: `Agent`, `@tool()`, provider. Everything else is opt-in.
 
 ---
 
-## 🤖 Provider Choices
-
-Dendrux works with multiple LLM providers. Swap one import — everything else stays the same.
-
-### Anthropic (Claude)
+## Install
 
 ```bash
-pip install "dendrux[anthropic,db]"
+pip install "dendrux[all]"            # everything (Anthropic + OpenAI + DB + bridge)
+pip install "dendrux[anthropic,db]"   # just Anthropic + SQLite
+pip install "dendrux[openai,db]"      # just OpenAI + SQLite
 ```
 
-```python
-from dendrux.llm.anthropic import AnthropicProvider
-
-provider = AnthropicProvider(model="claude-sonnet-4-6")
-# Uses ANTHROPIC_API_KEY from environment
-```
-
-### OpenAI (Chat Completions)
-
-Works with OpenAI and any compatible API — vLLM, SGLang, Groq, Together, Ollama.
+<details>
+<summary>Development install (from source)</summary>
 
 ```bash
-pip install "dendrux[openai,db]"
+git clone https://github.com/dendrux/dendrux.git
+cd dendrux/packages/python
+pip install -e ".[dev,all]"
 ```
 
-```python
-from dendrux.llm.openai import OpenAIProvider
-
-# OpenAI
-provider = OpenAIProvider(model="gpt-4o")
-
-# vLLM / SGLang (local)
-provider = OpenAIProvider(model="llama-3-70b", base_url="http://localhost:8000/v1")
-
-# Groq
-provider = OpenAIProvider(model="llama-3.3-70b", base_url="https://api.groq.com/openai/v1")
-```
-
-### OpenAI (Responses API)
-
-Use this when you need OpenAI's built-in tools (web search) alongside your own tools.
-
-```python
-from dendrux.llm.openai_responses import OpenAIResponsesProvider
-
-provider = OpenAIResponsesProvider(
-    model="gpt-4o",
-    builtin_tools=["web_search_preview"],
-)
-```
-
-> **Note:** Reasoning models (o-series, GPT-5) with multi-turn tool calling have a [known limitation](packages/python/src/dendrux/llm/openai_responses.py) — reasoning items are not preserved between turns. Use OpenAIProvider (Chat Completions) for reasoning model tool loops.
+</details>
 
 ---
 
-## ⚙️ Configuration
+## Five Pillars
 
-### Environment Variables
+Dendrux is built around five design commitments:
 
-Create a `.env` file in your project root:
-
-```bash
-# Required — pick one (or both)
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-
-# Optional — database location (default: ~/.dendrux/dendrux.db)
-DENDRUX_DATABASE_URL=sqlite+aiosqlite:///path/to/dendrux.db
-```
-
-Load it in your code:
-
-```python
-from dotenv import load_dotenv
-load_dotenv()
-```
-
-### Provider Settings
-
-All providers accept these at construction. Per-call kwargs override defaults.
-
-```python
-provider = AnthropicProvider(
-    model="claude-sonnet-4-6",
-    max_tokens=8_000,        # default 16K
-    temperature=0.7,          # default: model decides
-    timeout=300,              # HTTP timeout in seconds (default 120)
-    max_retries=3,            # auto-retry on transient errors (default 3)
-)
-
-provider = OpenAIProvider(
-    model="gpt-4o",
-    max_tokens=8_000,
-    temperature=0.7,
-    reasoning_effort="medium",  # for o-series / GPT-5
-    timeout=300,
-    base_url="http://...",      # for vLLM/SGLang/Groq (optional)
-)
-```
-
-You can also override per call:
-
-```python
-result = await agent.run("be creative", temperature=1.0, max_tokens=2000)
-```
-
-### Database
-
-Dendrux persists runs, traces, tool calls, and token usage when you provide a `database_url`.
-
-**SQLite (zero config):**
-
-```python
-from pathlib import Path
-
-agent = Agent(
-    provider=provider,
-    database_url=f"sqlite+aiosqlite:///{Path.home() / '.dendrux' / 'dendrux.db'}",
-    prompt="...",
-    tools=[...],
-)
-```
-
-Tables are auto-created on first use. No migrations needed.
-
-**Postgres:**
-
-```bash
-export DENDRUX_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dendrux
-dendrux db migrate
-```
-
-**Environment variable:** Set `DENDRUX_DATABASE_URL` once and skip passing `database_url` to every agent. The CLI and dashboard also use this env var automatically.
-
-**No database:** Omit `database_url` — the agent runs fine, just no persistence.
+| # | Pillar | What it means |
+|---|--------|---------------|
+| 1 | **Survive failure** | Durable writes, sweep, retry, idempotency. Runs never lie about state. |
+| 2 | **Control execution** | Tool constraints, timeouts, parallel/sequential policy, delegation depth guards. |
+| 3 | **Explain everything** | Every LLM call, tool execution, pause, and lifecycle event is persisted as evidence. |
+| 4 | **Coordinate agents** | Parent-child delegation with automatic linking, depth guards, and lifecycle coupling. |
+| 5 | **Pause for the real world** | Client-tool bridge for spreadsheets, browsers, and desktops with domain-aware constraints. |
 
 ---
 
-## ✨ Features
+## Features
 
-### 📟 Terminal Output (ConsoleObserver)
+### 🔄 Survive Failure
 
-See what your agent is doing in real time:
+Runs crash. Processes die. Dendrux handles it.
+
+**Durable persistence** — every trace, tool call, and lifecycle event is written through a durability layer with retry and exponential backoff. Transient DB failures (connection drops, lock timeouts, SQLite busy) are retried automatically. Logical errors propagate immediately. LLM interactions and token usage are persisted best-effort.
+
+**Sweep stale runs** — call `sweep()` at app startup to detect runs that were RUNNING when the process died or WAITING when no one came back. They're marked ERROR with structured failure reasons.
 
 ```python
-from dendrux.observers.console import ConsoleObserver
+from dendrux import sweep
+from datetime import timedelta
 
-result = await agent.run("do the thing", observer=ConsoleObserver())
+results = await sweep(
+    database_url="sqlite+aiosqlite:///runs.db",
+    stale_running=timedelta(minutes=20),
+    abandoned_waiting=timedelta(hours=2),
+)
 ```
 
-Shows iterations, tool calls with params, success/failure, token counts, and a summary panel. Opt-in — your agent code doesn't change.
+**Retry terminal runs** — a failed, cancelled, or timed-out run can be retried with prior context from persisted traces. If redaction is configured, the retried run sees scrubbed content. Same agent or a different one — different model, different tools.
 
-### 🔒 Tool Constraints
+```python
+result = await agent.retry("01JR...")
+```
 
-Control how often tools can be called and how long they can run:
+**Idempotency** — pass a key to prevent duplicate runs. Same key + same input returns the existing run. Same key + different input raises `IdempotencyConflictError`.
+
+```python
+result = await agent.run(
+    "Analyze Q3 report",
+    idempotency_key="q3-analysis-2026",
+)
+```
+
+### 🛡️ Control Execution
+
+**Tool constraints** — control how often tools run and how long they take. When a limit is hit, the agent gets a graceful message and adapts. No crash.
 
 ```python
 @tool(max_calls_per_run=3, timeout_seconds=120)
@@ -218,72 +130,34 @@ async def search(query: str) -> str:
     ...
 ```
 
-When a tool hits its limit, Dendrux returns a graceful message to the LLM — no crash, the agent adapts. If a tool times out, you get a warning with a hint to increase the timeout.
-
-### ⚡ Parallel Tool Execution
-
-When the LLM returns multiple tool calls in one response, Dendrux executes them concurrently:
+**Parallel execution** — when the LLM returns multiple tool calls, Dendrux executes them concurrently by default. Mark tools `parallel=False` for sequential execution.
 
 ```python
-@tool(parallel=True)    # default — runs concurrently with other parallel tools
+@tool(parallel=True)     # runs concurrently (default)
 async def fast_lookup(id: str) -> str: ...
 
-@tool(parallel=False)   # barrier — runs alone, in order
+@tool(parallel=False)    # runs alone, in order
 async def write_to_db(data: str) -> str: ...
 ```
 
-### ⏸️ Client Tool Pause/Resume
+**Delegation depth guards** — nested agent calls are tracked automatically. Runaway recursion is caught and stopped.
 
-Define tools that run on the client (browser, mobile, Excel). The agent pauses and waits:
+### 📊 Explain Everything
 
-```python
-@tool(target="client")
-async def read_excel_range(sheet: str, range: str) -> str:
-    """Read cells from the user's spreadsheet."""
-    return ""
-```
+Two event seams, separated by design:
 
-Mount the bridge for HTTP-based interaction:
+- **Recorder** (internal) — authoritative persistence. Fail-closed with durability retry. If a trace can't be written, the run stops.
+- **Notifier** (external) — best-effort UI notifications. Exceptions swallowed. Never kills a run.
 
 ```python
-from dendrux import bridge
+from dendrux.notifiers.console import ConsoleNotifier
 
-app.mount("/dendrux", bridge(agent, allow_insecure_dev_mode=True))
+result = await agent.run("do the thing", notifier=ConsoleNotifier())
 ```
 
-The bridge handles SSE streaming, tool result submission, polling, and cancellation. See [`examples/03_client_tools/`](packages/python/examples/03_client_tools/) for a working demo.
+Every run persists: traces with full message content, tool calls with parameters and results, LLM interactions with request/response payloads, token usage, timing, delegation links, and lifecycle events.
 
-### 🔔 Custom Observers
-
-Build your own observer in 10 lines — Slack, Telegram, webhooks, anything:
-
-```python
-class SlackObserver:
-    async def on_message_appended(self, message, iteration):
-        pass
-
-    async def on_llm_call_completed(self, response, iteration, **kwargs):
-        pass
-
-    async def on_tool_completed(self, tool_call, tool_result, iteration):
-        status = "ok" if tool_result.success else "failed"
-        await post_to_slack(f"Tool {tool_call.name} {status}")
-```
-
-Compose multiple observers:
-
-```python
-from dendrux.observers.composite import CompositeObserver
-
-result = await agent.run(
-    "do the thing",
-    observer=CompositeObserver([ConsoleObserver(), SlackObserver()]),
-)
-```
-
-### 🔐 Persistence + Redaction
-
-Scrub sensitive data before it's stored:
+**Redaction** — scrub sensitive data before it's stored:
 
 ```python
 agent = Agent(
@@ -294,9 +168,9 @@ agent = Agent(
 )
 ```
 
-### 🧩 Multi-Agent Composition
+### 🌳 Coordinate Agents
 
-Use agents as tools inside other agents:
+Use agents as tools inside other agents. Parent-child relationships are tracked automatically via `contextvars` — zero developer code.
 
 ```python
 @tool(max_calls_per_run=3, timeout_seconds=120)
@@ -311,168 +185,198 @@ async def research(query: str) -> str:
         return result.answer
 ```
 
-See [`examples/04_research_agent/`](packages/python/examples/04_research_agent/) for a full multi-agent example.
+The state store links parent and child runs. The dashboard shows the full delegation tree. Depth guards prevent runaway recursion.
+
+### ⏸️ Pause for the Real World
+
+**Client-tool bridge** — define tools that run on the client (browser, mobile, Excel). The agent pauses and waits.
+
+```python
+@tool(target="client")
+async def read_excel_range(sheet: str, range: str) -> str:
+    """Read cells from the user's spreadsheet."""
+    return ""
+
+from dendrux import bridge
+app.mount("/dendrux", bridge(agent, allow_insecure_dev_mode=True))
+```
+
+The bridge handles SSE streaming, tool result submission, polling, and cancellation. The agent resumes exactly where it paused.
+
+### 🔀 Streaming
+
+Stream events as they happen — token-by-token text, tool calls, lifecycle events:
+
+```python
+# Full event stream
+async for event in agent.stream("analyze revenue"):
+    print(event.type, event.text or "")
+
+# Just the text
+async for chunk in agent.stream("analyze revenue").text():
+    print(chunk, end="")
+
+# With cleanup
+async with agent.stream("analyze revenue") as stream:
+    async for event in stream:
+        ...
+```
+
+Works with all providers. If the consumer breaks early, the run is cancelled cleanly.
 
 ---
 
-## 📂 Examples
+## Architecture
+
+```
+Agent          → what to do (prompt, tools, limits)
+  ↓
+Runner         → orchestrates (idempotency, retry, sweep, persistence)
+  ↓
+Loop           → iterates (ReAct: think → act → observe → repeat)
+  ↓
+Strategy       → translates (universal types ↔ provider format)
+  ↓
+Provider       → calls the LLM (Anthropic, OpenAI, any compatible API)
+```
+
+The loop never touches provider-specific APIs. The strategy never calls the LLM. Each layer has one job.
+
+**Persistence flows through two separated paths:**
+- `LoopRecorder` → `PersistenceRecorder` → `StateStore` — evidence, fail-closed, durable retry
+- `LoopNotifier` → `ConsoleNotifier` / custom — notifications, best-effort, exceptions swallowed
+
+---
+
+## Providers
+
+Swap one import — everything else stays the same.
+
+**Anthropic (Claude)**
+```python
+from dendrux.llm.anthropic import AnthropicProvider
+provider = AnthropicProvider(model="claude-sonnet-4-6")
+```
+
+**OpenAI (Chat Completions)** — also works with vLLM, SGLang, Groq, Together, Ollama
+```python
+from dendrux.llm.openai import OpenAIProvider
+provider = OpenAIProvider(model="gpt-4o")
+provider = OpenAIProvider(model="llama-3-70b", base_url="http://localhost:8000/v1")
+```
+
+**OpenAI (Responses API)** — for built-in tools like web search alongside your own
+```python
+from dendrux.llm.openai_responses import OpenAIResponsesProvider
+provider = OpenAIResponsesProvider(model="gpt-4o", builtin_tools=["web_search_preview"])
+```
+
+All providers accept `max_tokens`, `temperature`, `timeout`, and `max_retries` at construction or per-call.
+
+> **Note:** Reasoning models (o-series, GPT-5) with multi-turn tool calling have a [known limitation](packages/python/src/dendrux/llm/openai_responses.py) — reasoning items are not preserved between turns. Use OpenAIProvider (Chat Completions) for reasoning model tool loops.
+
+---
+
+## Database
+
+SQLite works with zero config. Tables auto-create on first use.
+
+```python
+agent = Agent(
+    provider=provider,
+    database_url="sqlite+aiosqlite:///runs.db",
+    prompt="...",
+    tools=[...],
+)
+```
+
+Postgres supported via Alembic migrations: `dendrux db migrate`
+
+Set `DENDRUX_DATABASE_URL` once to skip passing `database_url` to every agent.
+
+Omit `database_url` entirely for ephemeral runs — no persistence, no overhead.
+
+---
+
+## CLI and Dashboard
+
+```bash
+dendrux runs                    # list all runs
+dendrux runs --status error     # filter by status
+dendrux traces <run_id>         # full conversation trace
+dendrux traces <run_id> --tools # with tool call details
+dendrux db migrate              # run Alembic migrations (Postgres)
+dendrux dashboard               # launch web dashboard at :8001
+```
+
+The dashboard shows runs, timelines, tool calls, token usage, delegation trees, and LLM payloads. All data is read-only and redacted.
+
+---
+
+## Examples
 
 | Example | What it shows |
-|---------|--------------|
+|---------|---------------|
 | [`01_hello_world.py`](packages/python/examples/01_hello_world.py) | Minimal agent with one tool |
 | [`02_persistent_agent.py`](packages/python/examples/02_persistent_agent.py) | SQLite persistence + CLI inspection |
-| [`03_client_tools/`](packages/python/examples/03_client_tools/) | Client tool pause/resume with bridge |
-| [`04_research_agent/`](packages/python/examples/04_research_agent/) | Multi-agent composition with Firecrawl |
-
----
-
-## 🖥️ CLI and Dashboard
-
-### 📟 CLI
-
-```bash
-dendrux runs                    # List all runs
-dendrux runs --status success   # Filter by status
-dendrux traces <run_id>         # Full conversation trace
-dendrux traces <run_id> --tools # With tool call details
-dendrux db migrate              # Run Alembic migrations (Postgres)
-dendrux db status               # Check migration status
-```
-
-### 📊 Dashboard
-
-> Requires the `bridge` extra: `pip install "dendrux[bridge]"` (included in `dendrux[all]`).
+| [`03_client_tools/`](packages/python/examples/03_client_tools/) | Client-tool bridge with pause/resume |
+| [`04_research_agent/`](packages/python/examples/04_research_agent/) | Multi-agent delegation with Firecrawl |
+| [`05_streaming_text.py`](packages/python/examples/05_streaming_text.py) | Token-by-token streaming |
+| [`06_streaming_tools.py`](packages/python/examples/06_streaming_tools.py) | Tool calls in streaming mode |
+| [`07_streaming_openai.py`](packages/python/examples/07_streaming_openai.py) | OpenAI Chat Completions streaming |
+| [`08_streaming_openai_responses.py`](packages/python/examples/08_streaming_openai_responses.py) | OpenAI Responses API streaming |
+| [`09_client_tools_streaming/`](packages/python/examples/09_client_tools_streaming/) | Bridge + streaming combined |
+| [`10_single_call.py`](packages/python/examples/10_single_call.py) | One-shot LLM call, no loop |
 
 ```bash
-dendrux dashboard               # Launch at http://localhost:8001
-dendrux dashboard --db ./my.db  # Point at a specific database
-dendrux dashboard --port 9000   # Custom port
+cd packages/python/examples
+ANTHROPIC_API_KEY=sk-... python 01_hello_world.py
 ```
-
-The dashboard shows runs, timelines, tool calls, token usage, and LLM payloads. All data is read-only.
 
 ---
 
-## 🐛 Troubleshooting
+## The Numbers
 
-<details>
-<summary><strong>LLM request timed out</strong></summary>
-
-The default HTTP timeout is 120s. For large outputs (reports, long reasoning), increase it:
-
-```python
-provider = AnthropicProvider(model="claude-sonnet-4-6", timeout=300)
-```
-
-</details>
-
-<details>
-<summary><strong>Tool timed out (default)</strong></summary>
-
-Default tool timeout is 120s. For slow tools (sub-agents, API calls), set it explicitly:
-
-```python
-@tool(timeout_seconds=300)
-async def slow_tool(query: str) -> str: ...
-```
-
-The warning message tells you exactly which tool and suggests the fix.
-
-</details>
-
-<details>
-<summary><strong>No runs found / wrong database</strong></summary>
-
-The CLI reads from `DENDRUX_DATABASE_URL` or `~/.dendrux/dendrux.db` by default. If your agent writes to a different path:
-
-```bash
-dendrux dashboard --db ./path/to/your.db
-```
-
-</details>
-
-<details>
-<summary><strong>Traces not saved</strong></summary>
-
-Persistence requires `database_url` on the Agent. Without it, the agent runs but nothing is stored:
-
-```python
-agent = Agent(provider=provider, database_url="sqlite+aiosqlite:///...", ...)
-```
-
-</details>
-
-<details>
-<summary><strong>Agent context manager</strong></summary>
-
-Always use `async with Agent(...) as agent:` — this ensures the HTTP client and database connections are closed cleanly. Without it, connections may leak.
-
-</details>
+| Metric | Value |
+|--------|-------|
+| Source code | 12,900+ lines |
+| Test code | 16,500+ lines |
+| Test functions | 773 |
+| Test-to-source ratio | 1.28 : 1 |
+| Min coverage enforced | 80% |
+| Python versions tested | 3.11, 3.12, 3.13 |
+| CI checks | lint, format, types, tests |
+| Alembic migrations | 7 |
+| Examples | 10 runnable scripts |
+| Development started | March 11, 2026 |
 
 ---
 
-## 📊 Current Status (v0.1.0a1)
+## Status
 
-| Feature | Status |
-|---------|--------|
-| Agent loop + ReAct reasoning | Shipped |
-| Tool calling (sync + async, parallel, timeouts, max_calls) | Shipped |
-| Anthropic Claude provider | Shipped |
-| OpenAI Chat Completions provider | Shipped |
-| OpenAI Responses API provider | Shipped (reasoning model tool loops limited) |
-| Compatible APIs (vLLM, SGLang, Groq, Ollama) | Shipped |
-| SQLite + Postgres persistence | Shipped |
-| CLI + Dashboard | Shipped |
-| Observer system (console, composite, custom) | Shipped |
-| Client tool pause/resume | Shipped |
-| Bridge transport (SSE) | Experimental |
-| Token-level streaming | Planned |
-| Gemini provider | Planned |
-| TypeScript client SDK | Planned |
+Dendrux is in active development (`v0.1.0a3`). The core API is stabilizing — `Agent`, `tool`, `run`, `stream`, `retry`, `resume`, `sweep` are the public surface and unlikely to break. Internal modules may still change.
 
----
+| Layer | Status |
+|-------|--------|
+| Agent loop + ReAct reasoning | Stable |
+| Tool calling (parallel, timeouts, constraints) | Stable |
+| Providers (Anthropic, OpenAI Chat, OpenAI Responses) | Stable |
+| Compatible APIs (vLLM, SGLang, Groq, Ollama) | Stable |
+| Persistence (SQLite + Postgres) | Stable |
+| Durability (retry, sweep, idempotency) | Stabilizing |
+| Retry terminal runs | Stabilizing |
+| Streaming (text + events) | Stabilizing |
+| Delegation context (parent-child linking) | Stabilizing |
+| Recorder/Notifier split | Stable |
+| CLI + Dashboard | Stabilizing |
+| Client-tool bridge | Experimental |
 
-## 🧑‍💻 Development
+Built with [Claude Code](https://claude.ai/code) and [Codex](https://openai.com/codex). 773 tests, strict types, Apache 2.0.
 
-```bash
-git clone https://github.com/dendrux/dendrux.git
-cd dendrux/packages/python
-pip install -e ".[dev,all]"
-make ci    # lint + typecheck + tests
-```
+## What Dendrux Is Not
 
-| Command | What it does |
-|---------|-------------|
-| `make ci` | Lint + typecheck + tests |
-| `make test` | Tests only |
-| `make format` | Auto-fix formatting |
-| `make lint` | Check without fixing |
-| `make typecheck` | mypy strict mode |
+Dendrux is not a hosted platform, a task queue, or a deployment tool. You own your server, your auth, your infra. Dendrux gives you `agent.run()` and gets out of the way.
 
-<details>
-<summary>Install extras</summary>
-
-| Extra | What it adds |
-|-------|-------------|
-| `anthropic` | Anthropic Claude SDK |
-| `openai` | OpenAI SDK |
-| `db` | SQLAlchemy, aiosqlite, Alembic |
-| `bridge` | FastAPI, uvicorn |
-| `postgres` | asyncpg |
-| `dev` | pytest, ruff, mypy |
-
-</details>
-
----
-
-## 🤖 How This Was Built
-
-Dendrux is built through AI pair programming using [Claude Code](https://claude.ai/code) and [Codex](https://openai.com/codex). Every commit is co-authored, every design decision discussed before implementation. The architecture, tests, and documentation were developed collaboratively between a human developer and AI assistants.
-
-This is a research project exploring what's possible when AI tools build AI infrastructure. The code is real, tested, and functional — but it reflects the pace and priorities of research, not the hardening of a production release.
-
----
-
-## 📄 License
+## License
 
 [Apache 2.0](LICENSE)

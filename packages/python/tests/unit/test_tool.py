@@ -55,16 +55,13 @@ class TestToolDecorator:
         assert td.target == ToolTarget.SERVER
 
     def test_decorator_options(self) -> None:
-        @tool(
-            target="server", parallel=False, priority=5, max_calls_per_run=3, timeout_seconds=60.0
-        )
+        @tool(target="server", parallel=False, max_calls_per_run=3, timeout_seconds=60.0)
         async def slow_search(query: str) -> str:
             """Search slowly."""
             return query
 
         td = get_tool_def(slow_search)
         assert td.parallel is False
-        assert td.priority == 5
         assert td.max_calls_per_run == 3
         assert td.timeout_seconds == 60.0
 
