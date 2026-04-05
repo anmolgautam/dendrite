@@ -26,13 +26,12 @@ import asyncio
 import sys
 from pathlib import Path
 
+from agents.scrape_agent import run_scrape
+from agents.search_agent import run_search
 from dotenv import load_dotenv
 
 from dendrux import Agent, tool
 from dendrux.llm.anthropic import AnthropicProvider
-
-from agents.search_agent import run_search
-from agents.scrape_agent import run_scrape
 
 load_dotenv()
 
@@ -111,7 +110,7 @@ Quality standards:
 async def main() -> None:
     topic = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
     if not topic:
-        print("Usage: python main.py \"your research topic\"")
+        print('Usage: python main.py "your research topic"')
         sys.exit(1)
 
     print(f"Researching: {topic}\n")
@@ -128,12 +127,12 @@ async def main() -> None:
     ) as agent:
         result = await agent.run(f"Research this topic thoroughly: {topic}")
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Status: {result.status.value}")
         print(f"Iterations: {result.iteration_count}")
         print(f"Tokens: {result.usage.total_tokens}")
         print(f"Run ID: {result.run_id}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         if result.answer:
             print(f"\n{result.answer}")
 

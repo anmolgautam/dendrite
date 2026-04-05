@@ -707,9 +707,7 @@ class TestCompleteStream:
         return events
 
     @staticmethod
-    def _tool_events(
-        name: str, tool_id: str, json_parts: list[str]
-    ) -> list[_FakeStreamEvent]:
+    def _tool_events(name: str, tool_id: str, json_parts: list[str]) -> list[_FakeStreamEvent]:
         """Build stream events for a tool call."""
         events = [
             _FakeStreamEvent(
@@ -738,9 +736,7 @@ class TestCompleteStream:
         provider._client.messages.stream = MagicMock(return_value=fake_stream)
 
         collected = []
-        async for event in provider.complete_stream(
-            [Message(role=Role.USER, content="Hi")]
-        ):
+        async for event in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
             collected.append(event)
 
         # Should have: 2 text deltas + 1 DONE
@@ -792,9 +788,8 @@ class TestCompleteStream:
             ],
             stop_reason="tool_use",
         )
-        events = (
-            self._text_events(["Let me", " calculate."])
-            + self._tool_events("add", "toolu_456", ['{"a": 15, "b":', " 27}"])
+        events = self._text_events(["Let me", " calculate."]) + self._tool_events(
+            "add", "toolu_456", ['{"a": 15, "b":', " 27}"]
         )
         fake_stream = _FakeStream(events, final_msg)
 
@@ -808,10 +803,10 @@ class TestCompleteStream:
 
         types = [e.type for e in collected]
         assert types == [
-            StreamEventType.TEXT_DELTA,      # "Let me"
-            StreamEventType.TEXT_DELTA,      # " calculate."
+            StreamEventType.TEXT_DELTA,  # "Let me"
+            StreamEventType.TEXT_DELTA,  # " calculate."
             StreamEventType.TOOL_USE_START,  # add starts
-            StreamEventType.TOOL_USE_END,    # add complete
+            StreamEventType.TOOL_USE_END,  # add complete
             StreamEventType.DONE,
         ]
         # Text accumulated correctly
@@ -830,18 +825,15 @@ class TestCompleteStream:
             ],
             stop_reason="tool_use",
         )
-        events = (
-            self._tool_events("add", "t1", ['{"a": 1, "b": 2}'])
-            + self._tool_events("multiply", "t2", ['{"x": 3, "y": 4}'])
+        events = self._tool_events("add", "t1", ['{"a": 1, "b": 2}']) + self._tool_events(
+            "multiply", "t2", ['{"x": 3, "y": 4}']
         )
         fake_stream = _FakeStream(events, final_msg)
 
         provider._client.messages.stream = MagicMock(return_value=fake_stream)
 
         collected = []
-        async for event in provider.complete_stream(
-            [Message(role=Role.USER, content="Do both")]
-        ):
+        async for event in provider.complete_stream([Message(role=Role.USER, content="Do both")]):
             collected.append(event)
 
         types = [e.type for e in collected]
@@ -869,9 +861,7 @@ class TestCompleteStream:
         provider._client.messages.stream = MagicMock(return_value=fake_stream)
 
         collected = []
-        async for event in provider.complete_stream(
-            [Message(role=Role.USER, content="Hi")]
-        ):
+        async for event in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
             collected.append(event)
 
         done = collected[-1]
@@ -889,9 +879,7 @@ class TestCompleteStream:
         )
 
         with pytest.raises(TimeoutError, match="timed out"):
-            async for _ in provider.complete_stream(
-                [Message(role=Role.USER, content="Hi")]
-            ):
+            async for _ in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
                 pass
 
     async def test_malformed_tool_json_falls_back_to_empty_params(
@@ -909,9 +897,7 @@ class TestCompleteStream:
         provider._client.messages.stream = MagicMock(return_value=fake_stream)
 
         collected = []
-        async for event in provider.complete_stream(
-            [Message(role=Role.USER, content="Hi")]
-        ):
+        async for event in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
             collected.append(event)
 
         tool_end = [e for e in collected if e.type == StreamEventType.TOOL_USE_END][0]
@@ -966,9 +952,7 @@ class TestBoundaryHardening:
 
         with caplog.at_level(logging.WARNING, logger="dendrux.llm.anthropic"):
             collected = []
-            async for event in provider.complete_stream(
-                [Message(role=Role.USER, content="go")]
-            ):
+            async for event in provider.complete_stream([Message(role=Role.USER, content="go")]):
                 collected.append(event)
 
         assert any("Malformed tool call JSON" in r.message for r in caplog.records)
@@ -976,9 +960,7 @@ class TestBoundaryHardening:
         tool_end = [e for e in collected if e.type == StreamEventType.TOOL_USE_END][0]
         assert tool_end.tool_call.params == {}
 
-    async def test_complete_connection_error_mapped(
-        self, provider: AnthropicProvider
-    ) -> None:
+    async def test_complete_connection_error_mapped(self, provider: AnthropicProvider) -> None:
         """APIConnectionError → ConnectionError with model context."""
         import anthropic
 
@@ -988,9 +970,7 @@ class TestBoundaryHardening:
         with pytest.raises(ConnectionError, match="Connection to Anthropic API failed"):
             await provider.complete([Message(role=Role.USER, content="Hi")])
 
-    async def test_stream_connection_error_mapped(
-        self, provider: AnthropicProvider
-    ) -> None:
+    async def test_stream_connection_error_mapped(self, provider: AnthropicProvider) -> None:
         """Streaming APIConnectionError → ConnectionError with model context."""
         import anthropic
 
@@ -998,7 +978,5 @@ class TestBoundaryHardening:
             side_effect=anthropic.APIConnectionError(request=None),  # type: ignore[arg-type]
         )
         with pytest.raises(ConnectionError, match="Connection to Anthropic API"):
-            async for _ in provider.complete_stream(
-                [Message(role=Role.USER, content="Hi")]
-            ):
+            async for _ in provider.complete_stream([Message(role=Role.USER, content="Hi")]):
                 pass  # pragma: no cover

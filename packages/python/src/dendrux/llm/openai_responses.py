@@ -291,7 +291,10 @@ class OpenAIResponsesProvider(LLMProvider):
             raise timeout_error("OpenAIResponsesProvider", self._timeout) from None
         except openai.APIConnectionError as exc:
             raise connection_error(
-                "OpenAI Responses API", self._model, exc, streaming=True,
+                "OpenAI Responses API",
+                self._model,
+                exc,
+                streaming=True,
             ) from exc
 
         # Accumulators for building the final LLMResponse
@@ -311,9 +314,7 @@ class OpenAIResponsesProvider(LLMProvider):
                 delta_text = event.delta
                 if delta_text:
                     text_parts.append(delta_text)
-                    yield StreamEvent(
-                        type=StreamEventType.TEXT_DELTA, text=delta_text
-                    )
+                    yield StreamEvent(type=StreamEventType.TEXT_DELTA, text=delta_text)
 
             # --- Function call lifecycle (ordered: added → delta → done) ---
             elif event_type == "response.output_item.added":
@@ -337,9 +338,7 @@ class OpenAIResponsesProvider(LLMProvider):
             elif event_type == "response.function_call_arguments.done":
                 item_id = event.item_id
                 raw_args = event.arguments
-                name, call_id = _active_calls.pop(
-                    item_id, ("unknown", item_id)
-                )
+                name, call_id = _active_calls.pop(item_id, ("unknown", item_id))
                 if name == "unknown":
                     logger.warning(
                         "Tool call completed with no matching start event — "
@@ -373,15 +372,9 @@ class OpenAIResponsesProvider(LLMProvider):
                 _completed_response = event.response
                 if hasattr(_completed_response, "usage") and _completed_response.usage:
                     usage = UsageStats(
-                        input_tokens=getattr(
-                            _completed_response.usage, "input_tokens", 0
-                        ),
-                        output_tokens=getattr(
-                            _completed_response.usage, "output_tokens", 0
-                        ),
-                        total_tokens=getattr(
-                            _completed_response.usage, "total_tokens", 0
-                        ),
+                        input_tokens=getattr(_completed_response.usage, "input_tokens", 0),
+                        output_tokens=getattr(_completed_response.usage, "output_tokens", 0),
+                        total_tokens=getattr(_completed_response.usage, "total_tokens", 0),
                     )
 
             # --- Response failed ---
@@ -397,9 +390,7 @@ class OpenAIResponsesProvider(LLMProvider):
             usage=usage,
         )
         llm_response.provider_request = captured_request
-        if _completed_response is not None and hasattr(
-            _completed_response, "model_dump"
-        ):
+        if _completed_response is not None and hasattr(_completed_response, "model_dump"):
             llm_response.provider_response = _completed_response.model_dump()
 
         yield StreamEvent(type=StreamEventType.DONE, raw=llm_response)

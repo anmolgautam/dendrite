@@ -81,9 +81,7 @@ class ConsoleNotifier(LoopNotifier):
                 params_str = ""
                 if self._show_params and tc.params:
                     params_str = f" [dim]{_format_params(tc.params)}[/dim]"
-                _console.print(
-                    f"  [yellow]  calling[/yellow] [bold]{tc.name}[/bold]{params_str}"
-                )
+                _console.print(f"  [yellow]  calling[/yellow] [bold]{tc.name}[/bold]{params_str}")
 
     async def on_llm_call_completed(
         self,

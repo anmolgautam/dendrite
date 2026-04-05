@@ -173,8 +173,7 @@ def resolve_parent_link(
         # Case 2: parent ephemeral, child persisted
         if "ephemeral_parent" not in parent_ctx.warned_mismatches:
             logger.warning(
-                "Delegation link skipped for child of run %s: "
-                "parent run is not persisted.",
+                "Delegation link skipped for child of run %s: parent run is not persisted.",
                 parent_ctx.run_id,
             )
             parent_ctx.warned_mismatches.add("ephemeral_parent")

@@ -47,6 +47,7 @@ def caplog_context(level: int = logging.WARNING):
         root.removeHandler(handler)
         root.setLevel(old_level)
 
+
 # ------------------------------------------------------------------
 # Test tools
 # ------------------------------------------------------------------
@@ -1244,6 +1245,7 @@ class TestToolSentinel:
 
     def test_explicit_default_value(self) -> None:
         """Even passing 120 explicitly should be marked as explicit."""
+
         @tool(timeout_seconds=120)
         async def same_as_default(x: str) -> str:
             """Same as default but explicit."""
@@ -1252,7 +1254,6 @@ class TestToolSentinel:
         td = get_tool_def(same_as_default)
         assert td.timeout_seconds == 120.0
         assert td.has_explicit_timeout is True
-
 
 
 # Need to import UsageStats for the usage test

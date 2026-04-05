@@ -997,7 +997,10 @@ class TestDelegationInfo:
             cost_usd=cost_usd,
         )
         await store.finalize_run(
-            run_id, status=status, iteration_count=1, total_usage=usage,
+            run_id,
+            status=status,
+            iteration_count=1,
+            total_usage=usage,
         )
 
     async def test_nonexistent_run_returns_none(self, store) -> None:
@@ -1007,7 +1010,12 @@ class TestDelegationInfo:
     async def test_solo_root_run(self, store) -> None:
         """A root run with no children or parent."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+            store,
+            "root",
+            "Orch",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.01,
         )
 
         info = await store.get_delegation_info("root")
@@ -1029,12 +1037,22 @@ class TestDelegationInfo:
     async def test_parent_child_tree(self, store) -> None:
         """Two-level tree: root → child."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=200, output_tokens=100, cost_usd=0.02,
+            store,
+            "root",
+            "Orch",
+            input_tokens=200,
+            output_tokens=100,
+            cost_usd=0.02,
         )
         await self._create_finalized_run(
-            store, "child", "Worker",
-            parent_run_id="root", delegation_level=1,
-            input_tokens=300, output_tokens=150, cost_usd=0.03,
+            store,
+            "child",
+            "Worker",
+            parent_run_id="root",
+            delegation_level=1,
+            input_tokens=300,
+            output_tokens=150,
+            cost_usd=0.03,
         )
 
         # Root perspective
@@ -1065,17 +1083,33 @@ class TestDelegationInfo:
     async def test_three_level_deep_tree(self, store) -> None:
         """root → mid → leaf — verifies depth, ancestry, and subtree rollup."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+            store,
+            "root",
+            "Orch",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.01,
         )
         await self._create_finalized_run(
-            store, "mid", "Research",
-            parent_run_id="root", delegation_level=1,
-            input_tokens=200, output_tokens=100, cost_usd=0.02,
+            store,
+            "mid",
+            "Research",
+            parent_run_id="root",
+            delegation_level=1,
+            input_tokens=200,
+            output_tokens=100,
+            cost_usd=0.02,
         )
         await self._create_finalized_run(
-            store, "leaf", "Fact",
-            parent_run_id="mid", delegation_level=2,
-            input_tokens=50, output_tokens=25, cost_usd=0.005, status="error",
+            store,
+            "leaf",
+            "Fact",
+            parent_run_id="mid",
+            delegation_level=2,
+            input_tokens=50,
+            output_tokens=25,
+            cost_usd=0.005,
+            status="error",
         )
 
         info = await store.get_delegation_info("root")
@@ -1125,19 +1159,34 @@ class TestDelegationInfo:
     async def test_mixed_known_unknown_cost(self, store) -> None:
         """Subtree with some known and some NULL costs."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+            store,
+            "root",
+            "Orch",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.01,
         )
         # c1 has no cost
         await self._create_finalized_run(
-            store, "c1", "W1",
-            parent_run_id="root", delegation_level=1,
-            input_tokens=200, output_tokens=100, cost_usd=None,
+            store,
+            "c1",
+            "W1",
+            parent_run_id="root",
+            delegation_level=1,
+            input_tokens=200,
+            output_tokens=100,
+            cost_usd=None,
         )
         # c2 has cost
         await self._create_finalized_run(
-            store, "c2", "W2",
-            parent_run_id="root", delegation_level=1,
-            input_tokens=300, output_tokens=150, cost_usd=0.03,
+            store,
+            "c2",
+            "W2",
+            parent_run_id="root",
+            delegation_level=1,
+            input_tokens=300,
+            output_tokens=150,
+            cost_usd=0.03,
         )
 
         info = await store.get_delegation_info("root")
@@ -1150,7 +1199,12 @@ class TestDelegationInfo:
     async def test_all_unknown_cost(self, store) -> None:
         """When no runs have cost, subtree_cost_usd is None."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=None,
+            store,
+            "root",
+            "Orch",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=None,
         )
 
         info = await store.get_delegation_info("root")
@@ -1183,13 +1237,23 @@ class TestDelegationInfo:
     async def test_wide_fanout(self, store) -> None:
         """Root with 5 children — all discovered by BFS."""
         await self._create_finalized_run(
-            store, "root", "Orch", input_tokens=100, output_tokens=50, cost_usd=0.01,
+            store,
+            "root",
+            "Orch",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.01,
         )
         for i in range(5):
             await self._create_finalized_run(
-                store, f"c{i}", f"W{i}",
-                parent_run_id="root", delegation_level=1,
-                input_tokens=10, output_tokens=5, cost_usd=0.001,
+                store,
+                f"c{i}",
+                f"W{i}",
+                parent_run_id="root",
+                delegation_level=1,
+                input_tokens=10,
+                output_tokens=5,
+                cost_usd=0.001,
             )
 
         info = await store.get_delegation_info("root")

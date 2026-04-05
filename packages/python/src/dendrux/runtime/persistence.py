@@ -48,7 +48,7 @@ async def _retry_critical(
         except Exception as exc:
             last_exc = exc
             if attempt < _MAX_RETRIES:
-                wait = _BASE_BACKOFF_S * (2 ** attempt)
+                wait = _BASE_BACKOFF_S * (2**attempt)
                 logger.warning(
                     "Persistence retry %d/%d for %s (run %s): %s — retrying in %.1fs",
                     attempt + 1,
@@ -67,9 +67,7 @@ def _identity(s: str) -> str:
     return s
 
 
-def _redact_value(
-    v: Any, redact: Callable[[str], str], _stack: set[int] | None = None
-) -> Any:
+def _redact_value(v: Any, redact: Callable[[str], str], _stack: set[int] | None = None) -> Any:
     """Recursively apply a string redactor to all string values.
 
     Uses an active recursion stack (not a global visited set) so that
@@ -322,9 +320,7 @@ class PersistenceRecorder(LoopRecorder):
         try:
             await self._store.touch_progress(self._run_id)
         except Exception:
-            logger.warning(
-                "Failed to touch progress for run %s", self._run_id, exc_info=True
-            )
+            logger.warning("Failed to touch progress for run %s", self._run_id, exc_info=True)
 
     async def on_tool_completed(
         self, tool_call: ToolCall, tool_result: ToolResult, iteration: int
@@ -374,6 +370,4 @@ class PersistenceRecorder(LoopRecorder):
         try:
             await self._store.touch_progress(self._run_id)
         except Exception:
-            logger.warning(
-                "Failed to touch progress for run %s", self._run_id, exc_info=True
-            )
+            logger.warning("Failed to touch progress for run %s", self._run_id, exc_info=True)

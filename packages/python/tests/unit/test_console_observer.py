@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from dendrux.agent import Agent
 from dendrux.llm.mock import MockLLM
 from dendrux.notifiers.composite import CompositeNotifier
@@ -25,9 +23,7 @@ class RecordingNotifier:
     async def on_message_appended(self, message: Message, iteration: int) -> None:
         self.messages.append((message, iteration))
 
-    async def on_llm_call_completed(
-        self, response: Any, iteration: int, **kwargs: Any
-    ) -> None:
+    async def on_llm_call_completed(self, response: Any, iteration: int, **kwargs: Any) -> None:
         self.llm_calls.append((response, iteration))
 
     async def on_tool_completed(
@@ -68,7 +64,10 @@ class TestConsoleNotifier:
 
         tc = ToolCall(name="broken", params={})
         tr = ToolResult(
-            name="broken", call_id=tc.id, payload="", success=False,
+            name="broken",
+            call_id=tc.id,
+            payload="",
+            success=False,
             error="something went wrong",
         )
         await obs.on_tool_completed(tc, tr, 1)
@@ -79,7 +78,10 @@ class TestConsoleNotifier:
 
         tc = ToolCall(name="search", params={})
         tr = ToolResult(
-            name="search", call_id=tc.id, payload="", success=False,
+            name="search",
+            call_id=tc.id,
+            payload="",
+            success=False,
             error="Tool 'search' has reached its maximum of 3 calls for this run.",
         )
         await obs.on_tool_completed(tc, tr, 1)
@@ -98,6 +100,7 @@ class TestAgentRunWithNotifier:
 
     async def test_notifier_receives_events(self) -> None:
         """External notifier receives all lifecycle events from agent.run()."""
+
         @tool()
         async def add(a: int, b: int) -> int:
             """Add."""
@@ -112,7 +115,7 @@ class TestAgentRunWithNotifier:
 
         recording = RecordingNotifier()
         agent = Agent(provider=mock, prompt="test", tools=[add])
-        result = await agent.run("What is 1+2?", notifier=recording)
+        await agent.run("What is 1+2?", notifier=recording)
 
         # Notifier received events
         assert len(recording.messages) > 0
@@ -148,6 +151,7 @@ class TestCompositeNotifier:
 
     async def test_one_failure_doesnt_block_others(self) -> None:
         """If one notifier fails, others still receive events."""
+
         class FailingNotifier:
             async def on_message_appended(self, message: Any, iteration: int) -> None:
                 raise RuntimeError("boom")

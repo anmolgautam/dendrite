@@ -1021,9 +1021,7 @@ class TestCompleteStream:
                                 FakeDeltaToolCall(
                                     index=0,
                                     id="call_1",
-                                    function=FakeDeltaFunction(
-                                        arguments='{"a"'
-                                    ),
+                                    function=FakeDeltaFunction(arguments='{"a"'),
                                 )
                             ]
                         )
@@ -1038,9 +1036,7 @@ class TestCompleteStream:
                             tool_calls=[
                                 FakeDeltaToolCall(
                                     index=0,
-                                    function=FakeDeltaFunction(
-                                        arguments=": 1}"
-                                    ),
+                                    function=FakeDeltaFunction(arguments=": 1}"),
                                 )
                             ]
                         )
@@ -1063,13 +1059,7 @@ class TestCompleteStream:
                 ]
             ),
             # Terminal
-            FakeChunk(
-                choices=[
-                    FakeStreamChoice(
-                        delta=FakeDelta(), finish_reason="tool_calls"
-                    )
-                ]
-            ),
+            FakeChunk(choices=[FakeStreamChoice(delta=FakeDelta(), finish_reason="tool_calls")]),
             # Usage
             FakeChunk(
                 choices=[],
@@ -1080,9 +1070,7 @@ class TestCompleteStream:
                 ),
             ),
         ]
-        provider._client.chat.completions.create = AsyncMock(
-            return_value=MockAsyncStream(chunks)
-        )
+        provider._client.chat.completions.create = AsyncMock(return_value=MockAsyncStream(chunks))
 
         events = []
         async for event in provider.complete_stream(
@@ -1091,28 +1079,20 @@ class TestCompleteStream:
             events.append(event)
 
         # START should have been emitted when name arrived
-        start = next(
-            e for e in events if e.type == StreamEventType.TOOL_USE_START
-        )
+        start = next(e for e in events if e.type == StreamEventType.TOOL_USE_START)
         assert start.tool_name == "add"
         assert start.tool_call_id == "call_1"
 
         # END should have all args (not dropped)
-        end = next(
-            e for e in events if e.type == StreamEventType.TOOL_USE_END
-        )
+        end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
         assert end.tool_call.name == "add"
         assert end.tool_call.params == {"a": 1}
         assert end.tool_call.provider_tool_call_id == "call_1"
 
-    async def test_stream_provider_response_populated(
-        self, provider: OpenAIProvider
-    ) -> None:
+    async def test_stream_provider_response_populated(self, provider: OpenAIProvider) -> None:
         """Streaming DONE event carries provider_response for evidence layer."""
         chunks = _text_chunks("Hi")
-        provider._client.chat.completions.create = AsyncMock(
-            return_value=MockAsyncStream(chunks)
-        )
+        provider._client.chat.completions.create = AsyncMock(return_value=MockAsyncStream(chunks))
 
         events = []
         async for event in provider.complete_stream(
@@ -1219,9 +1199,7 @@ class TestBoundaryHardening:
         end = next(e for e in events if e.type == StreamEventType.TOOL_USE_END)
         assert end.tool_call.name == "unknown"
 
-    async def test_complete_connection_error_mapped(
-        self, provider: OpenAIProvider
-    ) -> None:
+    async def test_complete_connection_error_mapped(self, provider: OpenAIProvider) -> None:
         """APIConnectionError → ConnectionError with model context."""
         provider._client.chat.completions.create = AsyncMock(
             side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]
@@ -1229,9 +1207,7 @@ class TestBoundaryHardening:
         with pytest.raises(ConnectionError, match="Connection to OpenAI API failed"):
             await provider.complete([Message(role=Role.USER, content="Hi")])
 
-    async def test_stream_connection_error_mapped(
-        self, provider: OpenAIProvider
-    ) -> None:
+    async def test_stream_connection_error_mapped(self, provider: OpenAIProvider) -> None:
         """Streaming APIConnectionError → ConnectionError with model context."""
         provider._client.chat.completions.create = AsyncMock(
             side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]

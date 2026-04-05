@@ -33,7 +33,7 @@ async def get_weather(city: str) -> dict:
 async def convert_temp(celsius: float, to_unit: str) -> str:
     """Convert a temperature from Celsius to another unit."""
     if to_unit.lower() == "fahrenheit":
-        return f"{celsius * 9/5 + 32:.1f}°F"
+        return f"{celsius * 9 / 5 + 32:.1f}°F"
     if to_unit.lower() == "kelvin":
         return f"{celsius + 273.15:.1f}K"
     return f"{celsius}°C"
@@ -72,7 +72,8 @@ async def main() -> None:
 
                 elif event.type == RunEventType.RUN_COMPLETED:
                     r = event.run_result
-                    print(f"\n\n--- {r.iteration_count} iterations, {r.usage.total_tokens} tokens ---")
+                    iters, toks = r.iteration_count, r.usage.total_tokens
+                    print(f"\n\n--- {iters} iterations, {toks} tokens ---")
 
                 elif event.type == RunEventType.RUN_ERROR:
                     print(f"\n[error] {event.error}")

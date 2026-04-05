@@ -6,10 +6,10 @@ a structured summary of findings.
 
 from __future__ import annotations
 
+from tools.firecrawl_tools import firecrawl_search
+
 from dendrux import Agent
 from dendrux.llm.anthropic import AnthropicProvider
-
-from tools.firecrawl_tools import firecrawl_search
 
 SEARCH_PROMPT = """\
 You are a web research specialist. Your job is to search for information on a given query

@@ -154,8 +154,10 @@ class DashboardMockStore:
             p = runs_by_id.get(run.parent_run_id)
             if p is not None:
                 parent = ParentRef(
-                    run_id=p.id, resolved=True,
-                    agent_name=p.agent_name, status=p.status,
+                    run_id=p.id,
+                    resolved=True,
+                    agent_name=p.agent_name,
+                    status=p.status,
                     delegation_level=p.delegation_level,
                 )
             else:
@@ -172,10 +174,14 @@ class DashboardMockStore:
             if a is None:
                 ancestry_complete = False
                 break
-            ancestry.append(RunBrief(
-                run_id=a.id, agent_name=a.agent_name,
-                status=a.status, delegation_level=a.delegation_level,
-            ))
+            ancestry.append(
+                RunBrief(
+                    run_id=a.id,
+                    agent_name=a.agent_name,
+                    status=a.status,
+                    delegation_level=a.delegation_level,
+                )
+            )
             cur = a.parent_run_id
         if cur and cur in visited:
             ancestry_complete = False
@@ -184,8 +190,10 @@ class DashboardMockStore:
         # Direct children
         children = [
             RunBrief(
-                run_id=c.id, agent_name=c.agent_name,
-                status=c.status, delegation_level=c.delegation_level,
+                run_id=c.id,
+                agent_name=c.agent_name,
+                status=c.status,
+                delegation_level=c.delegation_level,
             )
             for c in self._runs
             if c.parent_run_id == run_id
@@ -578,15 +586,32 @@ class TestDelegationBlock:
     async def test_root_run_has_delegation_block(self) -> None:
         """A root run with no children still gets a delegation block."""
         store = DashboardMockStore(
-            _runs=[_Run(id="r1", agent_name="Root", status="success",
-                        total_input_tokens=100, total_output_tokens=50,
-                        total_cost_usd=0.01)],
-            _events={"r1": [
-                _Event(id="e0", event_type="run.started", sequence_index=0,
-                       data={"agent_name": "Root"}),
-                _Event(id="e1", event_type="run.completed", sequence_index=1,
-                       data={"status": "success"}),
-            ]},
+            _runs=[
+                _Run(
+                    id="r1",
+                    agent_name="Root",
+                    status="success",
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                    total_cost_usd=0.01,
+                )
+            ],
+            _events={
+                "r1": [
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Root"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
+                ]
+            },
         )
         app = create_dashboard_api(store)  # type: ignore[arg-type]
         transport = ASGITransport(app=app)
@@ -613,26 +638,53 @@ class TestDelegationBlock:
         """Child run shows resolved parent; parent shows child in children list."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="root", agent_name="Orchestrator", status="success",
-                     total_input_tokens=200, total_output_tokens=100,
-                     total_cost_usd=0.02),
-                _Run(id="child1", agent_name="Worker", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=300, total_output_tokens=150,
-                     total_cost_usd=0.03),
+                _Run(
+                    id="root",
+                    agent_name="Orchestrator",
+                    status="success",
+                    total_input_tokens=200,
+                    total_output_tokens=100,
+                    total_cost_usd=0.02,
+                ),
+                _Run(
+                    id="child1",
+                    agent_name="Worker",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=300,
+                    total_output_tokens=150,
+                    total_cost_usd=0.03,
+                ),
             ],
             _events={
                 "root": [
-                    _Event(id="e0", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "Orchestrator"}),
-                    _Event(id="e1", event_type="run.completed", sequence_index=1,
-                           data={"status": "success"}),
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Orchestrator"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
                 ],
                 "child1": [
-                    _Event(id="e2", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "Worker"}),
-                    _Event(id="e3", event_type="run.completed", sequence_index=1,
-                           data={"status": "success"}),
+                    _Event(
+                        id="e2",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Worker"},
+                    ),
+                    _Event(
+                        id="e3",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
                 ],
             },
         )
@@ -661,8 +713,12 @@ class TestDelegationBlock:
             assert d["parent"]["resolved"] is True
             assert d["parent"]["agent_name"] == "Orchestrator"
             assert d["ancestry"] == [
-                {"run_id": "root", "agent_name": "Orchestrator",
-                 "status": "success", "delegation_level": 0},
+                {
+                    "run_id": "root",
+                    "agent_name": "Orchestrator",
+                    "status": "success",
+                    "delegation_level": 0,
+                },
             ]
             assert d["ancestry_complete"] is True
             assert d["children"] == []
@@ -671,16 +727,32 @@ class TestDelegationBlock:
         """Parent run_id exists but parent row is missing."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="orphan", agent_name="Worker", status="success",
-                     parent_run_id="missing_parent", delegation_level=1,
-                     total_input_tokens=100, total_output_tokens=50),
+                _Run(
+                    id="orphan",
+                    agent_name="Worker",
+                    status="success",
+                    parent_run_id="missing_parent",
+                    delegation_level=1,
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                ),
             ],
-            _events={"orphan": [
-                _Event(id="e0", event_type="run.started", sequence_index=0,
-                       data={"agent_name": "Worker"}),
-                _Event(id="e1", event_type="run.completed", sequence_index=1,
-                       data={"status": "success"}),
-            ]},
+            _events={
+                "orphan": [
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Worker"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
+                ]
+            },
         )
         app = create_dashboard_api(store)  # type: ignore[arg-type]
         transport = ASGITransport(app=app)
@@ -699,36 +771,77 @@ class TestDelegationBlock:
         """Three-level tree: root → child → grandchild."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="root", agent_name="Orch", status="success",
-                     total_input_tokens=100, total_output_tokens=50,
-                     total_cost_usd=0.01),
-                _Run(id="mid", agent_name="Research", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=200, total_output_tokens=100,
-                     total_cost_usd=0.02),
-                _Run(id="leaf", agent_name="Fact", status="error",
-                     parent_run_id="mid", delegation_level=2,
-                     total_input_tokens=50, total_output_tokens=25,
-                     total_cost_usd=0.005),
+                _Run(
+                    id="root",
+                    agent_name="Orch",
+                    status="success",
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                    total_cost_usd=0.01,
+                ),
+                _Run(
+                    id="mid",
+                    agent_name="Research",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=200,
+                    total_output_tokens=100,
+                    total_cost_usd=0.02,
+                ),
+                _Run(
+                    id="leaf",
+                    agent_name="Fact",
+                    status="error",
+                    parent_run_id="mid",
+                    delegation_level=2,
+                    total_input_tokens=50,
+                    total_output_tokens=25,
+                    total_cost_usd=0.005,
+                ),
             ],
             _events={
                 "root": [
-                    _Event(id="e0", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "Orch"}),
-                    _Event(id="e1", event_type="run.completed", sequence_index=1,
-                           data={"status": "success"}),
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Orch"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
                 ],
                 "mid": [
-                    _Event(id="e2", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "Research"}),
-                    _Event(id="e3", event_type="run.completed", sequence_index=1,
-                           data={"status": "success"}),
+                    _Event(
+                        id="e2",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Research"},
+                    ),
+                    _Event(
+                        id="e3",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
                 ],
                 "leaf": [
-                    _Event(id="e4", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "Fact"}),
-                    _Event(id="e5", event_type="run.completed", sequence_index=1,
-                           data={"status": "error"}),
+                    _Event(
+                        id="e4",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Fact"},
+                    ),
+                    _Event(
+                        id="e5",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "error"},
+                    ),
                 ],
             },
         )
@@ -767,24 +880,57 @@ class TestDelegationBlock:
         """Status counts include self + all descendants."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="root", agent_name="Orch", status="success",
-                     total_input_tokens=100, total_output_tokens=50),
-                _Run(id="c1", agent_name="W1", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=50, total_output_tokens=25),
-                _Run(id="c2", agent_name="W2", status="error",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=60, total_output_tokens=30),
-                _Run(id="c3", agent_name="W3", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=70, total_output_tokens=35),
+                _Run(
+                    id="root",
+                    agent_name="Orch",
+                    status="success",
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                ),
+                _Run(
+                    id="c1",
+                    agent_name="W1",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=50,
+                    total_output_tokens=25,
+                ),
+                _Run(
+                    id="c2",
+                    agent_name="W2",
+                    status="error",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=60,
+                    total_output_tokens=30,
+                ),
+                _Run(
+                    id="c3",
+                    agent_name="W3",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=70,
+                    total_output_tokens=35,
+                ),
             ],
-            _events={"root": [
-                _Event(id="e0", event_type="run.started", sequence_index=0,
-                       data={"agent_name": "Orch"}),
-                _Event(id="e1", event_type="run.completed", sequence_index=1,
-                       data={"status": "success"}),
-            ]},
+            _events={
+                "root": [
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Orch"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
+                ]
+            },
         )
         app = create_dashboard_api(store)  # type: ignore[arg-type]
         transport = ASGITransport(app=app)
@@ -800,17 +946,27 @@ class TestDelegationBlock:
         """A→B→A cycle in parent_run_id sets ancestry_complete=False."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="a", agent_name="A", status="success",
-                     parent_run_id="b", delegation_level=1),
-                _Run(id="b", agent_name="B", status="success",
-                     parent_run_id="a", delegation_level=1),
+                _Run(
+                    id="a", agent_name="A", status="success", parent_run_id="b", delegation_level=1
+                ),
+                _Run(
+                    id="b", agent_name="B", status="success", parent_run_id="a", delegation_level=1
+                ),
             ],
             _events={
                 "a": [
-                    _Event(id="e0", event_type="run.started", sequence_index=0,
-                           data={"agent_name": "A"}),
-                    _Event(id="e1", event_type="run.completed", sequence_index=1,
-                           data={"status": "success"}),
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "A"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
                 ],
             },
         )
@@ -829,24 +985,51 @@ class TestDelegationBlock:
         """Subtree with some known and some unknown costs."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="root", agent_name="Orch", status="success",
-                     total_input_tokens=100, total_output_tokens=50,
-                     total_cost_usd=0.01),
-                _Run(id="c1", agent_name="W1", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=200, total_output_tokens=100,
-                     total_cost_usd=None),  # Unknown cost
-                _Run(id="c2", agent_name="W2", status="success",
-                     parent_run_id="root", delegation_level=1,
-                     total_input_tokens=300, total_output_tokens=150,
-                     total_cost_usd=0.03),
+                _Run(
+                    id="root",
+                    agent_name="Orch",
+                    status="success",
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                    total_cost_usd=0.01,
+                ),
+                _Run(
+                    id="c1",
+                    agent_name="W1",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=200,
+                    total_output_tokens=100,
+                    total_cost_usd=None,
+                ),  # Unknown cost
+                _Run(
+                    id="c2",
+                    agent_name="W2",
+                    status="success",
+                    parent_run_id="root",
+                    delegation_level=1,
+                    total_input_tokens=300,
+                    total_output_tokens=150,
+                    total_cost_usd=0.03,
+                ),
             ],
-            _events={"root": [
-                _Event(id="e0", event_type="run.started", sequence_index=0,
-                       data={"agent_name": "Orch"}),
-                _Event(id="e1", event_type="run.completed", sequence_index=1,
-                       data={"status": "success"}),
-            ]},
+            _events={
+                "root": [
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Orch"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
+                ]
+            },
         )
         app = create_dashboard_api(store)  # type: ignore[arg-type]
         transport = ASGITransport(app=app)
@@ -864,16 +1047,31 @@ class TestDelegationBlock:
         """When no runs have cost, subtree_cost_usd is None."""
         store = DashboardMockStore(
             _runs=[
-                _Run(id="root", agent_name="Orch", status="success",
-                     total_input_tokens=100, total_output_tokens=50,
-                     total_cost_usd=None),
+                _Run(
+                    id="root",
+                    agent_name="Orch",
+                    status="success",
+                    total_input_tokens=100,
+                    total_output_tokens=50,
+                    total_cost_usd=None,
+                ),
             ],
-            _events={"root": [
-                _Event(id="e0", event_type="run.started", sequence_index=0,
-                       data={"agent_name": "Orch"}),
-                _Event(id="e1", event_type="run.completed", sequence_index=1,
-                       data={"status": "success"}),
-            ]},
+            _events={
+                "root": [
+                    _Event(
+                        id="e0",
+                        event_type="run.started",
+                        sequence_index=0,
+                        data={"agent_name": "Orch"},
+                    ),
+                    _Event(
+                        id="e1",
+                        event_type="run.completed",
+                        sequence_index=1,
+                        data={"status": "success"},
+                    ),
+                ]
+            },
         )
         app = create_dashboard_api(store)  # type: ignore[arg-type]
         transport = ASGITransport(app=app)

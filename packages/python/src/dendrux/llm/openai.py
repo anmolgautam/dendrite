@@ -498,8 +498,7 @@ class OpenAIProvider(LLMProvider):
         """Convert OpenAI ChatCompletion to Dendrux LLMResponse."""
         if not response.choices:
             raise RuntimeError(
-                "OpenAI returned a ChatCompletion with no choices. "
-                f"Model: {self._model}"
+                f"OpenAI returned a ChatCompletion with no choices. Model: {self._model}"
             )
         choice = response.choices[0]
         message = choice.message

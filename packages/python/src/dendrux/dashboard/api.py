@@ -180,9 +180,7 @@ def create_dashboard_api(state_store: StateStore) -> FastAPI:
         # Delegation block — always present since timeline check
         # already verified the run exists. The else is defensive.
         delegation_info = await state_store.get_delegation_info(run_id)
-        result["delegation"] = (
-            _delegation_to_dict(delegation_info) if delegation_info else None
-        )
+        result["delegation"] = _delegation_to_dict(delegation_info) if delegation_info else None
 
         return result
 

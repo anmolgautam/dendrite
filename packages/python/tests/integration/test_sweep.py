@@ -77,11 +77,7 @@ async def _create_run(
     # Override status if not running (create_run always sets running)
     if status != "running":
         async with store._session_factory() as session:
-            stmt = (
-                update(AgentRun)
-                .where(AgentRun.id == rid)
-                .values(status=status)
-            )
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(status=status)
             await session.execute(stmt)
             await session.commit()
 
@@ -153,9 +149,7 @@ class TestSweepStaleRuns:
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
 
         for status in ["waiting_client_tool", "waiting_human_input", "waiting_approval"]:
-            await _create_run(
-                store, status=status, last_progress_at=old_time
-            )
+            await _create_run(store, status=status, last_progress_at=old_time)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
         assert len(swept) == 0
@@ -165,9 +159,7 @@ class TestSweepStaleRuns:
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
 
         for status in ["success", "error", "cancelled", "max_iterations"]:
-            await _create_run(
-                store, status=status, last_progress_at=old_time
-            )
+            await _create_run(store, status=status, last_progress_at=old_time)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
         assert len(swept) == 0
@@ -175,17 +167,11 @@ class TestSweepStaleRuns:
     async def test_null_last_progress_at_falls_back_to_created_at(self, store):
         """If last_progress_at is NULL, created_at is used for staleness."""
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
-        rid = await _create_run(
-            store, last_progress_at=None, created_at=old_time
-        )
+        rid = await _create_run(store, last_progress_at=None, created_at=old_time)
 
         # Manually NULL out last_progress_at (create_run sets it)
         async with store._session_factory() as session:
-            stmt = (
-                update(AgentRun)
-                .where(AgentRun.id == rid)
-                .values(last_progress_at=None)
-            )
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(last_progress_at=None)
             await session.execute(stmt)
             await session.commit()
 
@@ -196,9 +182,7 @@ class TestSweepStaleRuns:
     async def test_never_started_classification(self, store):
         """Run without run.started event is classified as never_started."""
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
-        rid = await _create_run(
-            store, last_progress_at=old_time, emit_started_event=False
-        )
+        rid = await _create_run(store, last_progress_at=old_time, emit_started_event=False)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
 
@@ -212,9 +196,7 @@ class TestSweepStaleRuns:
     async def test_stale_running_classification(self, store):
         """Run with run.started event is classified as stale_running."""
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
-        await _create_run(
-            store, last_progress_at=old_time, emit_started_event=True
-        )
+        await _create_run(store, last_progress_at=old_time, emit_started_event=True)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
 
@@ -236,9 +218,7 @@ class TestSweepStaleRuns:
     async def test_structured_result(self, store):
         """SweptRun has all expected fields populated."""
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
-        rid = await _create_run(
-            store, agent_name="MyAgent", last_progress_at=old_time
-        )
+        rid = await _create_run(store, agent_name="MyAgent", last_progress_at=old_time)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
 
@@ -256,9 +236,7 @@ class TestSweepStaleRuns:
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
         rids = []
         for i in range(3):
-            rid = await _create_run(
-                store, agent_name=f"Agent{i}", last_progress_at=old_time
-            )
+            rid = await _create_run(store, agent_name=f"Agent{i}", last_progress_at=old_time)
             rids.append(rid)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
@@ -276,9 +254,7 @@ class TestSweepStaleRuns:
         waiting_rid = await _create_run(
             store, status="waiting_client_tool", last_progress_at=old_time
         )
-        done_rid = await _create_run(
-            store, status="success", last_progress_at=old_time
-        )
+        done_rid = await _create_run(store, status="success", last_progress_at=old_time)
 
         swept = await store.sweep_stale_runs(older_than=timedelta(minutes=20))
 
@@ -290,7 +266,6 @@ class TestSweepStaleRuns:
         assert (await store.get_run(waiting_rid)).status == "waiting_client_tool"
         assert (await store.get_run(done_rid)).status == "success"
 
-
     async def test_sweep_updates_updated_at(self, store, session_factory):
         """Swept runs have their updated_at refreshed."""
         old_time = dt.datetime.now(dt.UTC) - timedelta(minutes=30)
@@ -299,6 +274,7 @@ class TestSweepStaleRuns:
         # Read updated_at before sweep
         async with session_factory() as session:
             from sqlalchemy import select
+
             stmt = select(AgentRun).where(AgentRun.id == rid)
             result = await session.execute(stmt)
             row = result.scalar_one()
@@ -405,9 +381,7 @@ class TestSweepPublicAPI:
         from sqlalchemy import event
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        eng = create_async_engine(
-            db_url, connect_args={"check_same_thread": False}
-        )
+        eng = create_async_engine(db_url, connect_args={"check_same_thread": False})
 
         @event.listens_for(eng.sync_engine, "connect")
         def _fk(conn, _):

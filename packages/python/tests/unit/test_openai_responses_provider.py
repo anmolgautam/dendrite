@@ -792,9 +792,7 @@ class TestCompleteStream:
     ) -> None:
         """Streaming DONE event carries provider_response from completed event."""
         stream_events = _text_stream_events("Hi")
-        provider._client.responses.create = AsyncMock(
-            return_value=MockAsyncStream(stream_events)
-        )
+        provider._client.responses.create = AsyncMock(return_value=MockAsyncStream(stream_events))
 
         events = []
         async for event in provider.complete_stream(
@@ -892,9 +890,7 @@ class TestBoundaryHardening:
         with pytest.raises(ConnectionError, match="Connection to OpenAI Responses API failed"):
             await provider.complete([Message(role=Role.USER, content="Hi")])
 
-    async def test_stream_connection_error_mapped(
-        self, provider: OpenAIResponsesProvider
-    ) -> None:
+    async def test_stream_connection_error_mapped(self, provider: OpenAIResponsesProvider) -> None:
         """Streaming APIConnectionError → ConnectionError with model context."""
         provider._client.responses.create = AsyncMock(
             side_effect=openai.APIConnectionError(request=None),  # type: ignore[arg-type]

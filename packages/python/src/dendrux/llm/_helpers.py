@@ -74,8 +74,7 @@ def parse_tool_json_strict(
         params = json.loads(raw_json)
     except json.JSONDecodeError as exc:
         raise ValueError(
-            f"Tool call '{tool_name}' (id={call_id}) returned "
-            f"invalid JSON arguments: {raw_json!r}"
+            f"Tool call '{tool_name}' (id={call_id}) returned invalid JSON arguments: {raw_json!r}"
         ) from exc
     if not isinstance(params, dict):
         return {}
@@ -106,8 +105,7 @@ def connection_error(
     """Build a ConnectionError with model context."""
     verb = "failed during streaming" if streaming else "failed"
     return ConnectionError(
-        f"Connection to {api_name} {verb}. "
-        f"Model: {model}. Original error: {exc}"
+        f"Connection to {api_name} {verb}. Model: {model}. Original error: {exc}"
     )
 
 
@@ -135,17 +133,13 @@ def build_call_index(messages: list[Message]) -> dict[str, ToolCall]:
     return call_index
 
 
-def resolve_tool_message_call(
-    msg: Message, call_index: dict[str, ToolCall]
-) -> ToolCall:
+def resolve_tool_message_call(msg: Message, call_index: dict[str, ToolCall]) -> ToolCall:
     """Resolve a TOOL message's call_id to the original ToolCall.
 
     Raises ValueError if call_id is missing or references an unknown call.
     """
     if msg.call_id is None:
-        raise ValueError(
-            "TOOL message missing call_id — this violates Message.__post_init__"
-        )
+        raise ValueError("TOOL message missing call_id — this violates Message.__post_init__")
     original_call = call_index.get(msg.call_id)
     if original_call is None:
         raise ValueError(

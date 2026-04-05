@@ -6,10 +6,10 @@ summary of the content.
 
 from __future__ import annotations
 
+from tools.firecrawl_tools import firecrawl_scrape
+
 from dendrux import Agent
 from dendrux.llm.anthropic import AnthropicProvider
-
-from tools.firecrawl_tools import firecrawl_scrape
 
 SCRAPE_PROMPT = """\
 You are a content extraction specialist. Your job is to read a web page and return

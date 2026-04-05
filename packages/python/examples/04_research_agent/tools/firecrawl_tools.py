@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 
+from firecrawl import Firecrawl  # type: ignore[import-untyped]
+
 from dendrux import tool
-from firecrawl import Firecrawl
 
 
 def _get_client() -> Firecrawl:

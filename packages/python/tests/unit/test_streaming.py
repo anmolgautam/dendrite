@@ -136,7 +136,10 @@ class ErrorLLM(LLMProvider):
         return "error-mock"
 
     async def complete(
-        self, messages: list[Any], tools: list[Any] | None = None, **kw: Any,
+        self,
+        messages: list[Any],
+        tools: list[Any] | None = None,
+        **kw: Any,
     ) -> LLMResponse:
         raise self._error
 
@@ -346,10 +349,12 @@ class TestStreamEventFlow:
     async def test_tool_call_stream(self) -> None:
         """Tool call → TOOL_USE_START + TOOL_USE_END + TOOL_RESULT + next turn."""
         tc = ToolCall(name="add", params={"a": 3, "b": 4}, provider_tool_call_id="t1")
-        llm = StreamingMockLLM([
-            LLMResponse(tool_calls=[tc]),
-            LLMResponse(text="7"),
-        ])
+        llm = StreamingMockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="7"),
+            ]
+        )
         agent = Agent(prompt="Calculate.", tools=[add], provider=llm)
 
         stream = agent.stream("3+4?")
@@ -369,12 +374,14 @@ class TestStreamEventFlow:
 
     async def test_run_completed_carries_run_result(self) -> None:
         """RUN_COMPLETED event carries RunResult with status, answer, and usage."""
-        llm = StreamingMockLLM([
-            LLMResponse(
-                text="Hello!",
-                usage=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15),
-            ),
-        ])
+        llm = StreamingMockLLM(
+            [
+                LLMResponse(
+                    text="Hello!",
+                    usage=UsageStats(input_tokens=10, output_tokens=5, total_tokens=15),
+                ),
+            ]
+        )
         agent = Agent(prompt="Test.", tools=[add], provider=llm)
 
         stream = agent.stream("Hi")
@@ -392,11 +399,13 @@ class TestStreamEventFlow:
         """Agent exceeding max_iterations yields RUN_COMPLETED(MAX_ITERATIONS)."""
         tc = ToolCall(name="add", params={"a": 1, "b": 1}, provider_tool_call_id="t1")
         # Keep calling tools forever
-        llm = StreamingMockLLM([
-            LLMResponse(tool_calls=[tc]),
-            LLMResponse(tool_calls=[tc]),
-            LLMResponse(tool_calls=[tc]),
-        ])
+        llm = StreamingMockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(tool_calls=[tc]),
+            ]
+        )
         agent = Agent(prompt="Loop.", tools=[add], max_iterations=2, provider=llm)
 
         stream = agent.stream("Go")
@@ -478,10 +487,12 @@ class TestTextConvenience:
     async def test_text_skips_tool_events(self) -> None:
         """stream.text() ignores tool calls — only text from both turns."""
         tc = ToolCall(name="add", params={"a": 1, "b": 2}, provider_tool_call_id="t1")
-        llm = StreamingMockLLM([
-            LLMResponse(tool_calls=[tc]),
-            LLMResponse(text="3"),
-        ])
+        llm = StreamingMockLLM(
+            [
+                LLMResponse(tool_calls=[tc]),
+                LLMResponse(text="3"),
+            ]
+        )
         agent = Agent(prompt="Test.", tools=[add], provider=llm)
 
         stream = agent.stream("1+2?")
@@ -565,9 +576,7 @@ class ResumeStateStore:
         self.finalized: list[dict[str, Any]] = []
         self.paused: list[dict[str, Any]] = []
 
-    def seed_pause(
-        self, run_id: str, pause_data: dict[str, Any], status: str
-    ) -> None:
+    def seed_pause(self, run_id: str, pause_data: dict[str, Any], status: str) -> None:
         """Seed a paused run for testing."""
         self._pause_data[run_id] = pause_data
         self._status[run_id] = status
@@ -575,9 +584,7 @@ class ResumeStateStore:
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         return self._pause_data.get(run_id)
 
-    async def claim_paused_run(
-        self, run_id: str, *, expected_status: str
-    ) -> bool:
+    async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
         if self._status.get(run_id) != expected_status:
             return False
         self._status[run_id] = "running"
@@ -587,29 +594,32 @@ class ResumeStateStore:
         return _FakeRunRecord(run_id)
 
     async def get_run_events(self, run_id: str) -> list[Any]:
-        return [
-            _FakeEvent(e.get("sequence_index", 0))
-            for e in self._events.get(run_id, [])
-        ]
+        return [_FakeEvent(e.get("sequence_index", 0)) for e in self._events.get(run_id, [])]
 
     async def get_traces(self, run_id: str) -> list[Any]:
-        return [
-            _FakeTrace(t["order_index"])
-            for t in self._traces
-            if t["run_id"] == run_id
-        ]
+        return [_FakeTrace(t["order_index"]) for t in self._traces if t["run_id"] == run_id]
 
     async def save_run_event(self, run_id: str, **kwargs: Any) -> None:
         self._events.setdefault(run_id, []).append(kwargs)
 
     async def save_trace(
-        self, run_id: str, role: str, content: str,
-        *, order_index: int, meta: Any = None,
+        self,
+        run_id: str,
+        role: str,
+        content: str,
+        *,
+        order_index: int,
+        meta: Any = None,
     ) -> None:
-        self._traces.append({
-            "run_id": run_id, "role": role, "content": content,
-            "order_index": order_index, "meta": meta,
-        })
+        self._traces.append(
+            {
+                "run_id": run_id,
+                "role": role,
+                "content": content,
+                "order_index": order_index,
+                "meta": meta,
+            }
+        )
 
     async def save_tool_call(self, run_id: str, **kwargs: Any) -> None:
         pass
@@ -629,7 +639,11 @@ class ResumeStateStore:
         return True
 
     async def pause_run(
-        self, run_id: str, *, status: str, pause_data: dict[str, Any],
+        self,
+        run_id: str,
+        *,
+        status: str,
+        pause_data: dict[str, Any],
         iteration_count: int | None = None,
     ) -> None:
         self.paused.append({"run_id": run_id, "status": status})
@@ -770,9 +784,7 @@ class TestResumeStream:
         assert RunEventType.TEXT_DELTA in types
         assert types[-1] == RunEventType.RUN_COMPLETED
 
-        text = "".join(
-            e.text for e in events if e.type == RunEventType.TEXT_DELTA
-        )
+        text = "".join(e.text for e in events if e.type == RunEventType.TEXT_DELTA)
         assert text == "Got it"
 
     async def test_resume_stream_error_yields_run_error(self) -> None:
@@ -850,7 +862,9 @@ class TestResumeStream:
         """agent.resume_stream() raises ValueError for bad args synchronously."""
         llm = StreamingMockLLM([LLMResponse(text="ok")])
         agent = Agent(
-            prompt="Test.", tools=[add, read_range], provider=llm,
+            prompt="Test.",
+            tools=[add, read_range],
+            provider=llm,
         )
 
         # Both args

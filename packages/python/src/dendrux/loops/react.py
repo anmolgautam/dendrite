@@ -136,10 +136,11 @@ def _build_pause(
     usage: UsageStats,
 ) -> PauseState:
     """Build PauseState for client tool or clarification pause."""
-    pending_targets = {
-        tc.id: target_lookup.get(tc.name, ToolTarget.SERVER).value
-        for tc in pending_calls
-    } if pending_calls else {}
+    pending_targets = (
+        {tc.id: target_lookup.get(tc.name, ToolTarget.SERVER).value for tc in pending_calls}
+        if pending_calls
+        else {}
+    )
 
     return PauseState(
         agent_name=agent_name,
@@ -234,8 +235,7 @@ async def _process_tool_calls(
         current = call_counts.get(tc.name, 0) + batch_counts.get(tc.name, 0)
         if max_calls is not None and current >= max_calls:
             limit_msg = (
-                f"Tool '{tc.name}' has reached its maximum of "
-                f"{max_calls} calls for this run."
+                f"Tool '{tc.name}' has reached its maximum of {max_calls} calls for this run."
             )
             limit_result = ToolResult(
                 name=tc.name,
@@ -270,12 +270,19 @@ async def _process_tool_calls(
     executed: list[tuple[ToolCall, ToolResult]] = []
     for group, is_parallel in exec_groups:
         if is_parallel and len(group) > 1:
-            pairs = await asyncio.gather(*[
-                _execute_record_notify(
-                    tc, lookups, recorder, notifier, iteration, warnings,
-                )
-                for tc in group
-            ])
+            pairs = await asyncio.gather(
+                *[
+                    _execute_record_notify(
+                        tc,
+                        lookups,
+                        recorder,
+                        notifier,
+                        iteration,
+                        warnings,
+                    )
+                    for tc in group
+                ]
+            )
             executed.extend(pairs)
         else:
             for tc in group:
@@ -334,8 +341,11 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, recorder=recorder, notifier=notifier,
-            initial_history=initial_history, initial_steps=initial_steps,
+            user_input=user_input,
+            recorder=recorder,
+            notifier=notifier,
+            initial_history=initial_history,
+            initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
         history, call_counts, steps = state.history, state.call_counts, state.steps
@@ -345,7 +355,9 @@ class ReActLoop(Loop):
         end_iteration = agent.max_iterations + 1
         for iteration in range(start_iteration, end_iteration):
             messages, tools = strategy.build_messages(
-                system_prompt=agent.prompt, history=history, tool_defs=tool_defs,
+                system_prompt=agent.prompt,
+                history=history,
+                tool_defs=tool_defs,
             )
 
             # LLM call — batch
@@ -353,12 +365,21 @@ class ReActLoop(Loop):
             response = await provider.complete(messages, tools=tools, **_pkw)
             llm_duration_ms = int((time.monotonic() - t0) * 1000)
             await _record_llm(
-                recorder, response, iteration,
-                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+                recorder,
+                response,
+                iteration,
+                semantic_messages=messages,
+                semantic_tools=tools,
+                duration_ms=llm_duration_ms,
             )
             await _notify_llm(
-                notifier, response, iteration, notifier_warnings,
-                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+                notifier,
+                response,
+                iteration,
+                notifier_warnings,
+                semantic_messages=messages,
+                semantic_tools=tools,
+                duration_ms=llm_duration_ms,
             )
             _accumulate_usage(total_usage, response.usage)
 
@@ -367,61 +388,105 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Finish):
                 await _append_assistant(
-                    response, history, recorder, notifier, iteration, notifier_warnings,
+                    response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 meta = {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
                 return RunResult(
-                    run_id=resolved_run_id, status=RunStatus.SUCCESS,
-                    answer=step.action.answer, steps=steps,
-                    iteration_count=iteration, usage=total_usage, meta=meta,
+                    run_id=resolved_run_id,
+                    status=RunStatus.SUCCESS,
+                    answer=step.action.answer,
+                    steps=steps,
+                    iteration_count=iteration,
+                    usage=total_usage,
+                    meta=meta,
                 )
 
             if isinstance(step.action, Clarification):
                 await _append_assistant(
-                    response, history, recorder, notifier, iteration, notifier_warnings,
+                    response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 pause = _build_pause(
-                    agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
-                    history=history, steps=steps, iteration=iteration, usage=total_usage,
+                    agent_name=agent.name,
+                    pending_calls=[],
+                    target_lookup=lookups.target,
+                    history=history,
+                    steps=steps,
+                    iteration=iteration,
+                    usage=total_usage,
                 )
                 meta: dict[str, Any] = {"pause_state": pause}
                 if notifier_warnings:
                     meta["notifier_warnings"] = notifier_warnings
                 return RunResult(
-                    run_id=resolved_run_id, status=RunStatus.WAITING_HUMAN_INPUT,
-                    answer=step.action.question, steps=steps,
-                    iteration_count=iteration, usage=total_usage, meta=meta,
+                    run_id=resolved_run_id,
+                    status=RunStatus.WAITING_HUMAN_INPUT,
+                    answer=step.action.question,
+                    steps=steps,
+                    iteration_count=iteration,
+                    usage=total_usage,
+                    meta=meta,
                 )
 
             if isinstance(step.action, ToolCall):
                 await _append_assistant(
-                    response, history, recorder, notifier, iteration, notifier_warnings,
+                    response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 outcome = await _process_tool_calls(
-                    step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, recorder=recorder, notifier=notifier,
-                    iteration=iteration, history=history, warnings=notifier_warnings,
+                    step=step,
+                    call_counts=call_counts,
+                    lookups=lookups,
+                    strategy=strategy,
+                    recorder=recorder,
+                    notifier=notifier,
+                    iteration=iteration,
+                    history=history,
+                    warnings=notifier_warnings,
                 )
                 if outcome.pending_calls:
                     pause = _build_pause(
-                        agent_name=agent.name, pending_calls=outcome.pending_calls,
-                        target_lookup=lookups.target, history=history, steps=steps,
-                        iteration=iteration, usage=total_usage,
+                        agent_name=agent.name,
+                        pending_calls=outcome.pending_calls,
+                        target_lookup=lookups.target,
+                        history=history,
+                        steps=steps,
+                        iteration=iteration,
+                        usage=total_usage,
                     )
                     meta = {"pause_state": pause}
                     if notifier_warnings:
                         meta["notifier_warnings"] = notifier_warnings
                     return RunResult(
-                        run_id=resolved_run_id, status=RunStatus.WAITING_CLIENT_TOOL,
-                        steps=steps, iteration_count=iteration,
-                        usage=total_usage, meta=meta,
+                        run_id=resolved_run_id,
+                        status=RunStatus.WAITING_CLIENT_TOOL,
+                        steps=steps,
+                        iteration_count=iteration,
+                        usage=total_usage,
+                        meta=meta,
                     )
 
         meta = {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
         return RunResult(
-            run_id=resolved_run_id, status=RunStatus.MAX_ITERATIONS,
-            steps=steps, iteration_count=agent.max_iterations,
-            usage=total_usage, meta=meta,
+            run_id=resolved_run_id,
+            status=RunStatus.MAX_ITERATIONS,
+            steps=steps,
+            iteration_count=agent.max_iterations,
+            usage=total_usage,
+            meta=meta,
         )
 
     async def run_stream(
@@ -452,8 +517,11 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, recorder=recorder, notifier=notifier,
-            initial_history=initial_history, initial_steps=initial_steps,
+            user_input=user_input,
+            recorder=recorder,
+            notifier=notifier,
+            initial_history=initial_history,
+            initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
         history, call_counts, steps = state.history, state.call_counts, state.steps
@@ -463,7 +531,9 @@ class ReActLoop(Loop):
         end_iteration = agent.max_iterations + 1
         for iteration in range(start_iteration, end_iteration):
             messages, tools = strategy.build_messages(
-                system_prompt=agent.prompt, history=history, tool_defs=tool_defs,
+                system_prompt=agent.prompt,
+                history=history,
+                tool_defs=tool_defs,
             )
 
             # LLM call — streaming
@@ -477,12 +547,15 @@ class ReActLoop(Loop):
                     elif event.type == StreamEventType.TOOL_USE_START:
                         yield RunEvent(
                             type=RunEventType.TOOL_USE_START,
-                            tool_name=event.tool_name, tool_call_id=event.tool_call_id,
+                            tool_name=event.tool_name,
+                            tool_call_id=event.tool_call_id,
                         )
                     elif event.type == StreamEventType.TOOL_USE_END:
                         yield RunEvent(
-                            type=RunEventType.TOOL_USE_END, tool_call=event.tool_call,
-                            tool_name=event.tool_name, tool_call_id=event.tool_call_id,
+                            type=RunEventType.TOOL_USE_END,
+                            tool_call=event.tool_call,
+                            tool_name=event.tool_name,
+                            tool_call_id=event.tool_call_id,
                         )
                     elif event.type == StreamEventType.DONE:
                         llm_response = event.raw
@@ -498,12 +571,21 @@ class ReActLoop(Loop):
                 )
 
             await _record_llm(
-                recorder, llm_response, iteration,
-                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+                recorder,
+                llm_response,
+                iteration,
+                semantic_messages=messages,
+                semantic_tools=tools,
+                duration_ms=llm_duration_ms,
             )
             await _notify_llm(
-                notifier, llm_response, iteration, notifier_warnings,
-                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+                notifier,
+                llm_response,
+                iteration,
+                notifier_warnings,
+                semantic_messages=messages,
+                semantic_tools=tools,
+                duration_ms=llm_duration_ms,
             )
             _accumulate_usage(total_usage, llm_response.usage)
 
@@ -512,7 +594,12 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Finish):
                 await _append_assistant(
-                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
+                    llm_response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 meta: dict[str, Any] = (
                     {"notifier_warnings": notifier_warnings} if notifier_warnings else {}
@@ -520,20 +607,34 @@ class ReActLoop(Loop):
                 yield RunEvent(
                     type=RunEventType.RUN_COMPLETED,
                     run_result=RunResult(
-                        run_id=resolved_run_id, status=RunStatus.SUCCESS,
-                        answer=step.action.answer, steps=steps,
-                        iteration_count=iteration, usage=total_usage, meta=meta,
+                        run_id=resolved_run_id,
+                        status=RunStatus.SUCCESS,
+                        answer=step.action.answer,
+                        steps=steps,
+                        iteration_count=iteration,
+                        usage=total_usage,
+                        meta=meta,
                     ),
                 )
                 return
 
             if isinstance(step.action, Clarification):
                 await _append_assistant(
-                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
+                    llm_response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 pause = _build_pause(
-                    agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
-                    history=history, steps=steps, iteration=iteration, usage=total_usage,
+                    agent_name=agent.name,
+                    pending_calls=[],
+                    target_lookup=lookups.target,
+                    history=history,
+                    steps=steps,
+                    iteration=iteration,
+                    usage=total_usage,
                 )
                 meta = {"pause_state": pause}
                 if notifier_warnings:
@@ -541,32 +642,52 @@ class ReActLoop(Loop):
                 yield RunEvent(
                     type=RunEventType.RUN_PAUSED,
                     run_result=RunResult(
-                        run_id=resolved_run_id, status=RunStatus.WAITING_HUMAN_INPUT,
-                        answer=step.action.question, steps=steps,
-                        iteration_count=iteration, usage=total_usage, meta=meta,
+                        run_id=resolved_run_id,
+                        status=RunStatus.WAITING_HUMAN_INPUT,
+                        answer=step.action.question,
+                        steps=steps,
+                        iteration_count=iteration,
+                        usage=total_usage,
+                        meta=meta,
                     ),
                 )
                 return
 
             if isinstance(step.action, ToolCall):
                 await _append_assistant(
-                    llm_response, history, recorder, notifier, iteration, notifier_warnings,
+                    llm_response,
+                    history,
+                    recorder,
+                    notifier,
+                    iteration,
+                    notifier_warnings,
                 )
                 outcome = await _process_tool_calls(
-                    step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, recorder=recorder, notifier=notifier,
-                    iteration=iteration, history=history, warnings=notifier_warnings,
+                    step=step,
+                    call_counts=call_counts,
+                    lookups=lookups,
+                    strategy=strategy,
+                    recorder=recorder,
+                    notifier=notifier,
+                    iteration=iteration,
+                    history=history,
+                    warnings=notifier_warnings,
                 )
                 for tc, tool_result in outcome.all_results:
                     yield RunEvent(
                         type=RunEventType.TOOL_RESULT,
-                        tool_call=tc, tool_result=tool_result,
+                        tool_call=tc,
+                        tool_result=tool_result,
                     )
                 if outcome.pending_calls:
                     pause = _build_pause(
-                        agent_name=agent.name, pending_calls=outcome.pending_calls,
-                        target_lookup=lookups.target, history=history, steps=steps,
-                        iteration=iteration, usage=total_usage,
+                        agent_name=agent.name,
+                        pending_calls=outcome.pending_calls,
+                        target_lookup=lookups.target,
+                        history=history,
+                        steps=steps,
+                        iteration=iteration,
+                        usage=total_usage,
                     )
                     meta = {"pause_state": pause}
                     if notifier_warnings:
@@ -574,9 +695,12 @@ class ReActLoop(Loop):
                     yield RunEvent(
                         type=RunEventType.RUN_PAUSED,
                         run_result=RunResult(
-                            run_id=resolved_run_id, status=RunStatus.WAITING_CLIENT_TOOL,
-                            steps=steps, iteration_count=iteration,
-                            usage=total_usage, meta=meta,
+                            run_id=resolved_run_id,
+                            status=RunStatus.WAITING_CLIENT_TOOL,
+                            steps=steps,
+                            iteration_count=iteration,
+                            usage=total_usage,
+                            meta=meta,
                         ),
                     )
                     return
@@ -585,9 +709,12 @@ class ReActLoop(Loop):
         yield RunEvent(
             type=RunEventType.RUN_COMPLETED,
             run_result=RunResult(
-                run_id=resolved_run_id, status=RunStatus.MAX_ITERATIONS,
-                steps=steps, iteration_count=agent.max_iterations,
-                usage=total_usage, meta=meta,
+                run_id=resolved_run_id,
+                status=RunStatus.MAX_ITERATIONS,
+                steps=steps,
+                iteration_count=agent.max_iterations,
+                usage=total_usage,
+                meta=meta,
             ),
         )
 

@@ -104,7 +104,9 @@ class SingleCall(Loop):
         await notify_message(notifier, user_msg, 0)
 
         messages, _tools = strategy.build_messages(
-            system_prompt=agent.prompt, history=history, tool_defs=[],
+            system_prompt=agent.prompt,
+            history=history,
+            tool_defs=[],
         )
 
         t0 = time.monotonic()
@@ -119,13 +121,19 @@ class SingleCall(Loop):
             )
 
         await record_llm(
-            recorder, response, 1,
-            semantic_messages=messages, semantic_tools=None,
+            recorder,
+            response,
+            1,
+            semantic_messages=messages,
+            semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
         await notify_llm(
-            notifier, response, 1,
-            semantic_messages=messages, semantic_tools=None,
+            notifier,
+            response,
+            1,
+            semantic_messages=messages,
+            semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
 
@@ -195,7 +203,9 @@ class SingleCall(Loop):
         await notify_message(notifier, user_msg, 0)
 
         messages, _tools = strategy.build_messages(
-            system_prompt=agent.prompt, history=history, tool_defs=[],
+            system_prompt=agent.prompt,
+            history=history,
+            tool_defs=[],
         )
 
         t0 = time.monotonic()
@@ -232,13 +242,19 @@ class SingleCall(Loop):
             )
 
         await record_llm(
-            recorder, llm_response, 1,
-            semantic_messages=messages, semantic_tools=None,
+            recorder,
+            llm_response,
+            1,
+            semantic_messages=messages,
+            semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
         await notify_llm(
-            notifier, llm_response, 1,
-            semantic_messages=messages, semantic_tools=None,
+            notifier,
+            llm_response,
+            1,
+            semantic_messages=messages,
+            semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
 

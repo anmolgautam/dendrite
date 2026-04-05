@@ -61,10 +61,11 @@ class RecordingStateStore:
     def store_identity(self) -> str:
         return self._identity
 
-    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any) -> None:
-        self.created_runs.append(
-            {"run_id": run_id, "agent_name": agent_name, **kwargs}
-        )
+    async def create_run(self, run_id: str, agent_name: str, **kwargs: Any):
+        self.created_runs.append({"run_id": run_id, "agent_name": agent_name, **kwargs})
+        from dendrux.types import CreateRunResult, RunStatus
+
+        return CreateRunResult(run_id=run_id, outcome="created", status=RunStatus.RUNNING)
 
     async def finalize_run(self, run_id: str, **kwargs: Any) -> bool:
         kwargs.pop("expected_current_status", None)
@@ -322,13 +323,15 @@ class TestDelegationRunnerIntegration:
 
         parent_agent = Agent(prompt="Test.", tools=[delegate])
 
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="delegate", params={"task": "help me"})],
-            ),
-            LLMResponse(text="all done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="delegate", params={"task": "help me"})],
+                ),
+                LLMResponse(text="all done"),
+            ]
+        )
 
         await run(
             parent_agent,
@@ -377,13 +380,15 @@ class TestDelegationRunnerIntegration:
 
         parent_agent = Agent(prompt="Test.", tools=[delegate])
 
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(
             parent_agent,
@@ -435,13 +440,15 @@ class TestDelegationRunnerIntegration:
 
         parent_agent = Agent(prompt="Test.", tools=[delegate])
 
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(
             parent_agent,
@@ -557,13 +564,15 @@ class TestMaxDelegationDepth:
 
         parent_agent = Agent(prompt="Test.", tools=[delegate])
 
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="delegate", params={"task": "help"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         # max_delegation_depth=0 means no children allowed
         result = await run(
@@ -593,13 +602,15 @@ class TestMaxDelegationDepth:
 
         agent = Agent(prompt="Test.", tools=[capture_context])
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(
             agent,
@@ -625,13 +636,15 @@ class TestMaxDelegationDepth:
 
         agent = Agent(prompt="Test.", tools=[capture_context])
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(agent, provider=llm, user_input="go")
 
@@ -651,13 +664,15 @@ class TestMaxDelegationDepth:
 
         agent = Agent(prompt="Test.", tools=[capture_context])
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(agent, provider=llm, user_input="go", max_delegation_depth=None)
 
@@ -672,8 +687,11 @@ class TestMaxDelegationDepth:
         llm = MockLLM([LLMResponse(text="done")])
 
         await run(
-            agent, provider=llm, user_input="go",
-            state_store=store, max_delegation_depth=7,
+            agent,
+            provider=llm,
+            user_input="go",
+            state_store=store,
+            max_delegation_depth=7,
         )
 
         assert len(store.created_runs) == 1
@@ -687,8 +705,11 @@ class TestMaxDelegationDepth:
         llm = MockLLM([LLMResponse(text="done")])
 
         await run(
-            agent, provider=llm, user_input="go",
-            state_store=store, max_delegation_depth=None,
+            agent,
+            provider=llm,
+            user_input="go",
+            state_store=store,
+            max_delegation_depth=None,
         )
 
         meta = store.created_runs[0].get("meta", {})
@@ -727,13 +748,15 @@ class TestMaxDelegationDepth:
         async def spawn_child(msg: str) -> str:
             """Spawn a child that tries to loosen the depth limit."""
             child_agent = Agent(prompt="Child.", tools=[capture_inner])
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             # Child tries to set depth=100, but parent is 3
             await run(
                 child_agent,
@@ -750,16 +773,20 @@ class TestMaxDelegationDepth:
             return "ok"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(
-            parent_agent, provider=parent_llm, user_input="go",
+            parent_agent,
+            provider=parent_llm,
+            user_input="go",
             max_delegation_depth=3,
         )
 
@@ -771,13 +798,16 @@ class TestMaxDelegationDepth:
 
     async def test_child_loosen_emits_warning(self, caplog) -> None:
         """Explicit child loosen emits a warning with requested and effective values."""
+
         @tool()
         async def spawn_child(msg: str) -> str:
             """Spawn child with loosened depth."""
             child_agent = Agent(prompt="Child.", tools=[noop])
             child_llm = MockLLM([LLMResponse(text="done")])
             await run(
-                child_agent, provider=child_llm, user_input="go",
+                child_agent,
+                provider=child_llm,
+                user_input="go",
                 max_delegation_depth=100,
             )
             return "ok"
@@ -788,17 +818,21 @@ class TestMaxDelegationDepth:
             return "ok"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
             await run(
-                parent_agent, provider=parent_llm, user_input="go",
+                parent_agent,
+                provider=parent_llm,
+                user_input="go",
                 max_delegation_depth=3,
             )
 
@@ -812,13 +846,15 @@ class TestMaxDelegationDepth:
         async def spawn_child(msg: str) -> str:
             """Spawn a child that tightens the depth limit."""
             child_agent = Agent(prompt="Child.", tools=[capture_inner])
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             # Child tightens from 10 → 2
             await run(
                 child_agent,
@@ -835,13 +871,15 @@ class TestMaxDelegationDepth:
             return "ok"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=10)
 
@@ -859,13 +897,15 @@ class TestMaxDelegationDepth:
         async def spawn_child(msg: str) -> str:
             """Spawn a child that tries unbounded depth."""
             child_agent = Agent(prompt="Child.", tools=[capture_inner])
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             # Child tries unbounded, but parent has limit=5
             await run(
                 child_agent,
@@ -882,17 +922,21 @@ class TestMaxDelegationDepth:
             return "ok"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
             await run(
-                parent_agent, provider=parent_llm, user_input="go",
+                parent_agent,
+                provider=parent_llm,
+                user_input="go",
                 max_delegation_depth=5,
             )
 
@@ -912,13 +956,15 @@ class TestMaxDelegationDepth:
         async def spawn_child(msg: str) -> str:
             """Spawn child without explicit depth."""
             child_agent = Agent(prompt="Child.", tools=[capture_inner])
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             # No max_delegation_depth — should inherit silently
             await run(child_agent, provider=child_llm, user_input="go")
             return "spawned"
@@ -930,17 +976,21 @@ class TestMaxDelegationDepth:
             return "ok"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
             await run(
-                parent_agent, provider=parent_llm, user_input="go",
+                parent_agent,
+                provider=parent_llm,
+                user_input="go",
                 max_delegation_depth=3,
             )
 
@@ -962,16 +1012,20 @@ class TestMaxDelegationDepth:
             captured_contexts.append(get_delegation_context())
             return "ok"
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
         agent = Agent(
-            prompt="Test.", tools=[capture_context],
-            max_delegation_depth=7, provider=llm,
+            prompt="Test.",
+            tools=[capture_context],
+            max_delegation_depth=7,
+            provider=llm,
         )
 
         await agent.run("go")
@@ -990,16 +1044,20 @@ class TestMaxDelegationDepth:
             captured_contexts.append(get_delegation_context())
             return "ok"
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
         agent = Agent(
-            prompt="Test.", tools=[capture_context],
-            max_delegation_depth=7, provider=llm,
+            prompt="Test.",
+            tools=[capture_context],
+            max_delegation_depth=7,
+            provider=llm,
         )
 
         await agent.run("go", max_delegation_depth=3)
@@ -1021,29 +1079,35 @@ class TestMaxDelegationDepth:
         @tool()
         async def spawn_child(msg: str) -> str:
             """Spawn child with agent-level default higher than parent's limit."""
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             # Child agent has default=50, but parent limit is 3
             child_agent = Agent(
-                prompt="Child.", tools=[capture_inner],
-                max_delegation_depth=50, provider=child_llm,
+                prompt="Child.",
+                tools=[capture_inner],
+                max_delegation_depth=50,
+                provider=child_llm,
             )
             await child_agent.run("go")
             return "spawned"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=3)
 
@@ -1063,28 +1127,34 @@ class TestMaxDelegationDepth:
         @tool()
         async def spawn_child(msg: str) -> str:
             """Spawn child with agent-level default lower than parent's limit."""
-            child_llm = MockLLM([
-                LLMResponse(
-                    text=None,
-                    tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
-                ),
-                LLMResponse(text="done"),
-            ])
+            child_llm = MockLLM(
+                [
+                    LLMResponse(
+                        text=None,
+                        tool_calls=[ToolCall(name="capture_inner", params={"msg": "hi"})],
+                    ),
+                    LLMResponse(text="done"),
+                ]
+            )
             child_agent = Agent(
-                prompt="Child.", tools=[capture_inner],
-                max_delegation_depth=2, provider=child_llm,
+                prompt="Child.",
+                tools=[capture_inner],
+                max_delegation_depth=2,
+                provider=child_llm,
             )
             await child_agent.run("go")
             return "spawned"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_child])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_child", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         await run(parent_agent, provider=parent_llm, user_input="go", max_delegation_depth=10)
 
@@ -1099,6 +1169,7 @@ class TestMaxDelegationDepth:
     def test_subclass_default_negative_depth_raises(self) -> None:
         """Subclass with class-level max_delegation_depth=-1 raises at construction."""
         with pytest.raises(ValueError, match="non-negative integer"):
+
             class BadAgent(Agent):
                 prompt = "Bad."
                 max_delegation_depth = -1
@@ -1107,6 +1178,7 @@ class TestMaxDelegationDepth:
 
     async def test_fanout_clamp_warning_deduped(self, caplog) -> None:
         """Two sibling children both trying to loosen emit only one warning."""
+
         @tool()
         async def noop(msg: str) -> str:
             """No-op."""
@@ -1119,23 +1191,29 @@ class TestMaxDelegationDepth:
                 child_agent = Agent(prompt="Child.", tools=[noop])
                 child_llm = MockLLM([LLMResponse(text="done")])
                 await run(
-                    child_agent, provider=child_llm, user_input="go",
+                    child_agent,
+                    provider=child_llm,
+                    user_input="go",
                     max_delegation_depth=100,
                 )
             return "spawned"
 
         parent_agent = Agent(prompt="Parent.", tools=[spawn_two])
-        parent_llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="spawn_two", params={"msg": "go"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        parent_llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="spawn_two", params={"msg": "go"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
 
         with caplog.at_level("WARNING", logger="dendrux.runtime.runner"):
             await run(
-                parent_agent, provider=parent_llm, user_input="go",
+                parent_agent,
+                provider=parent_llm,
+                user_input="go",
                 max_delegation_depth=3,
             )
 
@@ -1154,13 +1232,15 @@ class TestMaxDelegationDepth:
             captured_contexts.append(get_delegation_context())
             return "ok"
 
-        llm = MockLLM([
-            LLMResponse(
-                text=None,
-                tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
-            ),
-            LLMResponse(text="done"),
-        ])
+        llm = MockLLM(
+            [
+                LLMResponse(
+                    text=None,
+                    tool_calls=[ToolCall(name="capture_context", params={"msg": "hi"})],
+                ),
+                LLMResponse(text="done"),
+            ]
+        )
         # No max_delegation_depth on agent or run call
         agent = Agent(prompt="Test.", tools=[capture_context], provider=llm)
 

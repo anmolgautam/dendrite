@@ -62,9 +62,7 @@ async def sweep(
             "database_url and state_store are mutually exclusive. Pass one or the other."
         )
     if database_url is None and state_store is None:
-        raise ValueError(
-            "Either database_url or state_store is required."
-        )
+        raise ValueError("Either database_url or state_store is required.")
     if stale_running is None:
         return SweepResult(stale_running=[])
 
