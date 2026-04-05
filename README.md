@@ -228,23 +228,15 @@ Works with all providers. If the consumer breaks early, the run is cancelled cle
 
 ## Architecture
 
-```
-Agent          → what to do (prompt, tools, limits)
-  ↓
-Runner         → orchestrates (idempotency, retry, sweep, persistence)
-  ↓
-Loop           → iterates (ReAct: think → act → observe → repeat)
-  ↓
-Strategy       → translates (universal types ↔ provider format)
-  ↓
-Provider       → calls the LLM (Anthropic, OpenAI, any compatible API)
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="Dendrux architecture layers" width="680">
+</p>
 
 The loop never touches provider-specific APIs. The strategy never calls the LLM. Each layer has one job.
 
 **Persistence flows through two separated paths:**
-- `LoopRecorder` → `PersistenceRecorder` → `StateStore` — evidence, fail-closed, durable retry
-- `LoopNotifier` → `ConsoleNotifier` / custom — notifications, best-effort, exceptions swallowed
+- **Evidence** (right): Recorder → StateStore — fail-closed, durable retry
+- **Display** (left): Notifier → Console / custom — best-effort, exceptions swallowed
 
 ---
 
