@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from dendrux.types import (
@@ -184,6 +184,7 @@ class SweepResult:
     """Result of a sweep operation."""
 
     stale_running: list[SweptRun]
+    abandoned_waiting: list[SweptRun] = field(default_factory=list)
 
 
 @dataclass
@@ -377,6 +378,21 @@ class StateStore(Protocol):
         """Find RUNNING rows older than threshold and mark them ERROR.
 
         Returns list of swept runs with classification.
+        """
+        ...
+
+    async def sweep_abandoned_runs(
+        self,
+        older_than: timedelta,
+    ) -> list[SweptRun]:
+        """Find WAITING_CLIENT_TOOL/WAITING_HUMAN_INPUT rows older than
+        threshold and mark them ERROR with failure_reason=abandoned_waiting.
+
+        Detection uses updated_at (last state change). Waiting runs have
+        no forward progress by design, so last_progress_at is wrong here.
+
+        Returns list of swept runs with previous_status reflecting the
+        original waiting status.
         """
         ...
 
@@ -1121,6 +1137,105 @@ class SQLAlchemyStateStore:
                         agent_name=row.agent_name,
                         previous_status="running",
                         failure_reason=classification,
+                        last_progress_at=row.last_progress_at,
+                        swept_at=now,
+                    )
+                )
+
+        return swept
+
+    async def sweep_abandoned_runs(
+        self,
+        older_than: timedelta,
+    ) -> list[SweptRun]:
+        """Find WAITING_CLIENT_TOOL/WAITING_HUMAN_INPUT rows older than
+        threshold and mark them ERROR with failure_reason=abandoned_waiting.
+        """
+        import datetime as _dt
+
+        from sqlalchemy import select, update
+
+        from dendrux.db.enums import AgentRunStatus
+        from dendrux.db.models import AgentRun, RunEvent
+
+        now = _dt.datetime.now(_dt.UTC)
+        cutoff = now - older_than
+
+        waiting_statuses = [
+            AgentRunStatus.WAITING_CLIENT_TOOL,
+            AgentRunStatus.WAITING_HUMAN_INPUT,
+        ]
+
+        swept: list[SweptRun] = []
+
+        async with self._session_factory() as session:
+            # Find abandoned waiting rows
+            stmt = select(AgentRun).where(
+                AgentRun.status.in_(waiting_statuses),
+                AgentRun.updated_at < cutoff,
+            )
+            result = await session.execute(stmt)
+            abandoned_rows = result.scalars().all()
+
+            if not abandoned_rows:
+                return swept
+
+            # Get max sequence_index per run for event ordering
+            from sqlalchemy import func as sa_func
+
+            run_ids = [r.id for r in abandoned_rows]
+            seq_stmt = (
+                select(
+                    RunEvent.agent_run_id,
+                    sa_func.max(RunEvent.sequence_index),
+                )
+                .where(RunEvent.agent_run_id.in_(run_ids))
+                .group_by(RunEvent.agent_run_id)
+            )
+            seq_result = await session.execute(seq_stmt)
+            max_seqs: dict[str, int] = {row[0]: row[1] for row in seq_result.all()}
+
+            # Process each abandoned run
+            for row in abandoned_rows:
+                previous_status = row.status
+
+                # CAS-guarded update: only if still in the expected waiting status
+                update_stmt = (
+                    update(AgentRun)
+                    .where(AgentRun.id == row.id, AgentRun.status == previous_status)
+                    .values(
+                        status=AgentRunStatus.ERROR,
+                        failure_reason="abandoned_waiting",
+                        updated_at=sa_func.now(),
+                    )
+                )
+                update_result = await session.execute(update_stmt)
+
+                if update_result.rowcount == 0:
+                    continue  # Status changed between SELECT and UPDATE
+
+                # Emit run.abandoned event
+                next_seq = (max_seqs.get(row.id, -1)) + 1
+                max_seqs[row.id] = next_seq
+
+                event = RunEvent(
+                    id=generate_ulid(),
+                    agent_run_id=row.id,
+                    event_type="run.abandoned",
+                    sequence_index=next_seq,
+                    data={"failure_reason": "abandoned_waiting"},
+                )
+                session.add(event)
+
+                # Per-run commit for isolation
+                await session.commit()
+
+                swept.append(
+                    SweptRun(
+                        run_id=row.id,
+                        agent_name=row.agent_name,
+                        previous_status=previous_status,
+                        failure_reason="abandoned_waiting",
                         last_progress_at=row.last_progress_at,
                         swept_at=now,
                     )

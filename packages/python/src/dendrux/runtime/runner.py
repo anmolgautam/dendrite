@@ -485,6 +485,30 @@ async def run(
         reset_delegation_context(ctx_token)
 
 
+async def _raise_resume_claim_failure(
+    state_store: StateStore, run_id: str, expected_status: str
+) -> None:
+    """Raise a descriptive error when resume claim fails.
+
+    Checks the actual run status to give a specific message for swept
+    (abandoned/stale) runs instead of the generic "claimed by another caller."
+    """
+    run = await state_store.get_run(run_id)
+    if run is not None and run.status == "error" and run.failure_reason:
+        reason = run.failure_reason
+        if reason == "abandoned_waiting":
+            raise ValueError(
+                f"Run '{run_id}' was abandoned (swept as expired waiting run). "
+                f"It cannot be resumed."
+            )
+        if reason in ("stale_running", "never_started"):
+            raise ValueError(f"Run '{run_id}' was swept as stale ({reason}). It cannot be resumed.")
+    raise ValueError(
+        f"Run '{run_id}' is not in status '{expected_status}' — "
+        f"cannot resume. It may have been claimed by another caller."
+    )
+
+
 async def _build_cached_result(state_store: StateStore, run_id: str) -> RunResult:
     """Rebuild a summary RunResult from persisted DB state for idempotent dedup.
 
@@ -1121,10 +1145,7 @@ async def _resume_core(
     if not _skip_claim:
         claimed = await state_store.claim_paused_run(run_id, expected_status=expected_status)
         if not claimed:
-            raise ValueError(
-                f"Run '{run_id}' is not in status '{expected_status}' — "
-                f"cannot resume. It may have been claimed by another caller."
-            )
+            await _raise_resume_claim_failure(state_store, run_id, expected_status)
 
     # 4-8. Prepare history, notifier, sequencer (shared with resume_stream)
     ctx = await _prepare_resume(
@@ -1324,10 +1345,7 @@ def resume_stream(
 
             claimed = await store.claim_paused_run(run_id, expected_status=expected)
             if not claimed:
-                raise ValueError(
-                    f"Run '{run_id}' is not in status '{expected}' — "
-                    f"cannot resume. It may have been claimed by another caller."
-                )
+                await _raise_resume_claim_failure(store, run_id, expected)
 
             # 5. Prepare (shared helper — history, notifier, sequencer)
             ctx = await _prepare_resume(

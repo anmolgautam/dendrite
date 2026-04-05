@@ -1,7 +1,7 @@
-"""Stale-run sweep — public maintenance API.
+"""Run sweep — public maintenance API.
 
-Detects runs stuck in RUNNING beyond a threshold and marks them ERROR
-with a structured failure reason. Developer calls this at app startup.
+Detects stale RUNNING and abandoned WAITING runs, marks them ERROR
+with structured failure reasons. Developer calls this at app startup.
 
 Usage::
 
@@ -10,11 +10,14 @@ Usage::
     results = await sweep(
         database_url="sqlite+aiosqlite:///runs.db",
         stale_running=timedelta(minutes=20),
+        abandoned_waiting=timedelta(hours=2),
     )
 
     for run in results.stale_running:
-        logger.warning("Swept %s (%s), reason=%s",
-                        run.run_id, run.agent_name, run.failure_reason)
+        logger.warning("Swept stale: %s (%s)", run.run_id, run.failure_reason)
+
+    for run in results.abandoned_waiting:
+        logger.warning("Swept abandoned: %s (%s)", run.run_id, run.previous_status)
 """
 
 from __future__ import annotations
@@ -34,12 +37,13 @@ async def sweep(
     database_url: str | None = None,
     state_store: StateStore | None = None,
     stale_running: timedelta | None = None,
+    abandoned_waiting: timedelta | None = None,
 ) -> SweepResult:
-    """Sweep stale runs. Developer calls this at app startup.
+    """Sweep stale and abandoned runs. Developer calls this at app startup.
 
-    Dendrux detects and marks stale RUNNING rows as ERROR, emits
-    ``run.interrupted`` events, and returns a structured report of
-    what it changed. The developer decides any follow-up action.
+    Detects stale RUNNING rows and abandoned WAITING rows, marks them
+    ERROR with structured failure reasons, emits lifecycle events, and
+    returns a report of what changed.
 
     Args:
         database_url: Database URL. Creates a temporary engine, disposed
@@ -49,13 +53,16 @@ async def sweep(
         stale_running: Threshold for stale RUNNING detection. Runs with
             no forward progress beyond this duration are swept. If None,
             no stale-running sweep is performed.
+        abandoned_waiting: Threshold for abandoned WAITING detection.
+            WAITING_CLIENT_TOOL and WAITING_HUMAN_INPUT runs with no
+            state change beyond this duration are swept. If None, no
+            abandoned-waiting sweep is performed.
 
     Returns:
-        SweepResult with list of swept runs.
+        SweepResult with lists of swept runs by category.
 
     Raises:
-        ValueError: If both or neither of database_url/state_store provided,
-            or if no sweep threshold is specified.
+        ValueError: If both or neither of database_url/state_store provided.
     """
     if database_url is not None and state_store is not None:
         raise ValueError(
@@ -63,7 +70,7 @@ async def sweep(
         )
     if database_url is None and state_store is None:
         raise ValueError("Either database_url or state_store is required.")
-    if stale_running is None:
+    if stale_running is None and abandoned_waiting is None:
         return SweepResult(stale_running=[])
 
     store: StateStore
@@ -71,14 +78,18 @@ async def sweep(
 
     if database_url is not None:
         store, engine = await _create_temp_store(database_url)
-
     else:
         assert state_store is not None
         store = state_store
 
     try:
-        swept = await store.sweep_stale_runs(older_than=stale_running)
-        return SweepResult(stale_running=swept)
+        stale = await store.sweep_stale_runs(older_than=stale_running) if stale_running else []
+        abandoned = (
+            await store.sweep_abandoned_runs(older_than=abandoned_waiting)
+            if abandoned_waiting
+            else []
+        )
+        return SweepResult(stale_running=stale, abandoned_waiting=abandoned)
     finally:
         if engine is not None:
             await engine.dispose()

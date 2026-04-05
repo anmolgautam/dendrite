@@ -399,3 +399,274 @@ class TestSweepPublicAPI:
         )
         assert len(result.stale_running) == 1
         assert result.stale_running[0].failure_reason == "stale_running"
+
+
+class TestSweepAbandonedRuns:
+    """Tests for StateStore.sweep_abandoned_runs()."""
+
+    async def test_old_waiting_client_tool_is_swept(self, store):
+        """A WAITING_CLIENT_TOOL row with old updated_at is swept."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+
+        # Force updated_at to be old
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        assert len(swept) == 1
+        assert swept[0].run_id == rid
+        assert swept[0].failure_reason == "abandoned_waiting"
+        assert swept[0].previous_status == "waiting_client_tool"
+
+        run = await store.get_run(rid)
+        assert run.status == "error"
+        assert run.failure_reason == "abandoned_waiting"
+
+    async def test_old_waiting_human_input_is_swept(self, store):
+        """A WAITING_HUMAN_INPUT row with old updated_at is swept."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_human_input", last_progress_at=old_time)
+
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        assert len(swept) == 1
+        assert swept[0].previous_status == "waiting_human_input"
+
+    async def test_fresh_waiting_not_swept(self, store):
+        """A WAITING row with recent updated_at is NOT swept."""
+        rid = await _create_run(store, status="waiting_client_tool")
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        assert len(swept) == 0
+        run = await store.get_run(rid)
+        assert run.status == "waiting_client_tool"
+
+    async def test_waiting_approval_not_swept(self, store):
+        """WAITING_APPROVAL is not swept in v1 (reserved, not implemented)."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        await _create_run(store, status="waiting_approval", last_progress_at=old_time)
+
+        async with store._session_factory() as session:
+            # Force updated_at to be old for all runs
+            stmt = update(AgentRun).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+        assert len(swept) == 0
+
+    async def test_running_not_swept_by_abandonment(self, store):
+        """RUNNING rows are not touched by abandonment sweep."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, last_progress_at=old_time)
+
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+        assert len(swept) == 0
+
+    async def test_terminal_not_swept_by_abandonment(self, store):
+        """Terminal rows are not touched by abandonment sweep."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        for status in ["success", "error", "cancelled", "max_iterations"]:
+            rid = await _create_run(store, status=status, last_progress_at=old_time)
+            async with store._session_factory() as session:
+                stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+                await session.execute(stmt)
+                await session.commit()
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+        assert len(swept) == 0
+
+    async def test_abandoned_event_emitted(self, store):
+        """Sweep emits a run.abandoned event."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        events = await store.get_run_events(rid)
+        abandoned = [e for e in events if e.event_type == "run.abandoned"]
+        assert len(abandoned) == 1
+        assert abandoned[0].data == {"failure_reason": "abandoned_waiting"}
+
+    async def test_pause_data_preserved(self, store):
+        """Swept abandoned runs keep their pause_data for forensics."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+
+        # Set pause_data and force old updated_at
+        async with store._session_factory() as session:
+            stmt = (
+                update(AgentRun)
+                .where(AgentRun.id == rid)
+                .values(
+                    pause_data={"pending": ["tool1"]},
+                    updated_at=old_time,
+                )
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        # pause_data should still be there
+        pause = await store.get_pause_state(rid)
+        assert pause == {"pending": ["tool1"]}
+
+    async def test_multiple_abandoned_runs(self, store):
+        """Multiple abandoned runs are all swept."""
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rids = []
+        for status in ["waiting_client_tool", "waiting_human_input", "waiting_client_tool"]:
+            rid = await _create_run(store, status=status, last_progress_at=old_time)
+            async with store._session_factory() as session:
+                stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+                await session.execute(stmt)
+                await session.commit()
+            rids.append(rid)
+
+        swept = await store.sweep_abandoned_runs(older_than=timedelta(hours=2))
+
+        assert len(swept) == 3
+        swept_ids = {s.run_id for s in swept}
+        assert swept_ids == set(rids)
+
+
+class TestSweepPublicAPIAbandoned:
+    """Tests for sweep() with abandoned_waiting parameter."""
+
+    async def test_sweep_with_abandoned_waiting(self, store):
+        """sweep(abandoned_waiting=...) works."""
+        from dendrux.runtime.sweep import sweep as sweep_fn
+
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        result = await sweep_fn(
+            state_store=store,
+            abandoned_waiting=timedelta(hours=2),
+        )
+
+        assert len(result.abandoned_waiting) == 1
+        assert result.abandoned_waiting[0].failure_reason == "abandoned_waiting"
+        assert len(result.stale_running) == 0
+
+    async def test_sweep_both_thresholds(self, store):
+        """sweep() with both stale_running and abandoned_waiting sweeps both."""
+        from dendrux.runtime.sweep import sweep as sweep_fn
+
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+
+        # Create a stale running run
+        stale_rid = await _create_run(store, last_progress_at=old_time)
+
+        # Create an abandoned waiting run
+        wait_rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+        async with store._session_factory() as session:
+            stmt = update(AgentRun).where(AgentRun.id == wait_rid).values(updated_at=old_time)
+            await session.execute(stmt)
+            await session.commit()
+
+        result = await sweep_fn(
+            state_store=store,
+            stale_running=timedelta(hours=1),
+            abandoned_waiting=timedelta(hours=2),
+        )
+
+        assert len(result.stale_running) == 1
+        assert result.stale_running[0].run_id == stale_rid
+        assert len(result.abandoned_waiting) == 1
+        assert result.abandoned_waiting[0].run_id == wait_rid
+
+    async def test_sweep_only_abandoned_no_stale(self, store):
+        """sweep(abandoned_waiting=...) without stale_running skips stale sweep."""
+        from dendrux.runtime.sweep import sweep as sweep_fn
+
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+
+        # Stale running run — should NOT be swept
+        await _create_run(store, last_progress_at=old_time)
+
+        result = await sweep_fn(
+            state_store=store,
+            abandoned_waiting=timedelta(hours=2),
+        )
+
+        assert len(result.stale_running) == 0
+        assert len(result.abandoned_waiting) == 0  # no waiting runs
+
+
+class TestResumeClaimFailureMessaging:
+    """Tests for _raise_resume_claim_failure() error messaging."""
+
+    async def test_abandoned_run_gives_specific_error(self, store):
+        """Resume on an abandoned run gives 'was abandoned' error, not generic."""
+        from dendrux.runtime.runner import _raise_resume_claim_failure
+
+        old_time = dt.datetime.now(dt.UTC) - timedelta(hours=3)
+        rid = await _create_run(store, status="waiting_client_tool", last_progress_at=old_time)
+
+        # Simulate sweep: set error + failure_reason
+        async with store._session_factory() as session:
+            stmt = (
+                update(AgentRun)
+                .where(AgentRun.id == rid)
+                .values(status="error", failure_reason="abandoned_waiting")
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        with pytest.raises(ValueError, match="was abandoned"):
+            await _raise_resume_claim_failure(store, rid, "waiting_client_tool")
+
+    async def test_stale_run_gives_specific_error(self, store):
+        """Resume on a stale-swept run gives 'swept as stale' error."""
+        from dendrux.runtime.runner import _raise_resume_claim_failure
+
+        rid = await _create_run(store)
+
+        async with store._session_factory() as session:
+            stmt = (
+                update(AgentRun)
+                .where(AgentRun.id == rid)
+                .values(status="error", failure_reason="stale_running")
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        with pytest.raises(ValueError, match="swept as stale"):
+            await _raise_resume_claim_failure(store, rid, "running")
+
+    async def test_generic_claim_failure(self, store):
+        """Resume on a run claimed by another caller gives generic error."""
+        from dendrux.runtime.runner import _raise_resume_claim_failure
+
+        rid = await _create_run(store)
+
+        # Simulate another caller claimed it (status changed to running, no failure_reason)
+        with pytest.raises(ValueError, match="claimed by another caller"):
+            await _raise_resume_claim_failure(store, rid, "waiting_client_tool")
