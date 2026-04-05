@@ -71,13 +71,13 @@ class RecordingStateStore:
         self.finalized_runs.append({"run_id": run_id, **kwargs})
         return True
 
-    async def save_trace(self, run_id: str, **kwargs: Any) -> None:
+    async def save_trace(self, run_id: str, *args: Any, **kwargs: Any) -> None:
         pass
 
-    async def save_tool_call(self, run_id: str, **kwargs: Any) -> None:
+    async def save_tool_call(self, run_id: str, *args: Any, **kwargs: Any) -> None:
         pass
 
-    async def save_usage(self, run_id: str, **kwargs: Any) -> None:
+    async def save_usage(self, run_id: str, *args: Any, **kwargs: Any) -> None:
         pass
 
     async def save_run_event(self, run_id: str, **kwargs: Any) -> None:

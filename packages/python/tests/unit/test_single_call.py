@@ -406,6 +406,21 @@ class TestSingleCallRunnerIntegration:
             async def save_run_event(self, *args, **kwargs):
                 pass
 
+            async def save_trace(self, *args, **kwargs):
+                pass
+
+            async def save_tool_call(self, *args, **kwargs):
+                pass
+
+            async def save_usage(self, *args, **kwargs):
+                pass
+
+            async def save_llm_interaction(self, *args, **kwargs):
+                pass
+
+            async def touch_progress(self, *args, **kwargs):
+                pass
+
         store = RecordingStore()
         llm = MockLLM([_response("neutral")])
         agent = Agent(

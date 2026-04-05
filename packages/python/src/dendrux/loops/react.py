@@ -26,7 +26,14 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from dendrux.loops._helpers import notify_llm, notify_message, notify_tool
+from dendrux.loops._helpers import (
+    notify_llm,
+    notify_message,
+    notify_tool,
+    record_llm,
+    record_message,
+    record_tool,
+)
 from dendrux.loops.base import Loop
 from dendrux.tool import DEFAULT_TOOL_TIMEOUT, get_tool_def
 from dendrux.types import (
@@ -53,13 +60,16 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import LoopObserver
+    from dendrux.loops.base import LoopObserver, LoopRecorder
     from dendrux.strategies.base import Strategy
     from dendrux.types import LLMResponse
 
 logger = logging.getLogger(__name__)
 
 
+_record_message = record_message
+_record_llm = record_llm
+_record_tool = record_tool
 _notify_message = notify_message
 _notify_llm = notify_llm
 _notify_tool = notify_tool
@@ -88,17 +98,19 @@ def _accumulate_usage(total: UsageStats, step_usage: UsageStats) -> None:
 async def _append_assistant(
     response: LLMResponse,
     history: list[Message],
+    recorder: LoopRecorder | None,
     observer: LoopObserver | None,
     iteration: int,
     warnings: list[str],
 ) -> Message:
-    """Create assistant message from LLM response, append to history, notify observer."""
+    """Create assistant message, append to history, record then notify."""
     msg = Message(
         role=Role.ASSISTANT,
         content=response.text or "",
         tool_calls=response.tool_calls,
     )
     history.append(msg)
+    await _record_message(recorder, msg, iteration)
     await _notify_message(observer, msg, iteration, warnings)
     return msg
 
@@ -154,6 +166,7 @@ class _LoopState(NamedTuple):
 async def _init_loop_state(
     *,
     user_input: str,
+    recorder: LoopRecorder | None,
     observer: LoopObserver | None,
     initial_history: list[Message] | None,
     initial_steps: list[AgentStep] | None,
@@ -165,6 +178,7 @@ async def _init_loop_state(
     else:
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
+        await _record_message(recorder, user_msg, 0)
         await _notify_message(observer, user_msg, 0)
 
     call_counts: dict[str, int] = {}
@@ -195,6 +209,7 @@ async def _process_tool_calls(
     call_counts: dict[str, int],
     lookups: ToolLookups,
     strategy: Strategy,
+    recorder: LoopRecorder | None,
     observer: LoopObserver | None,
     iteration: int,
     history: list[Message],
@@ -206,14 +221,12 @@ async def _process_tool_calls(
     calls. Both run() and run_stream() call this — the caller decides
     whether to yield events from the results.
 
-    Side effects: mutates call_counts, appends to history, notifies observer.
+    Side effects: mutates call_counts, appends to history, records then notifies.
     """
     all_calls: list[ToolCall] = step.meta.get("all_tool_calls", [step.action])
     all_results: list[tuple[ToolCall, ToolResult]] = []
 
     # --- Phase 1: Enforce max_calls_per_run ---
-    # Uses a provisional counter so duplicate tool calls within a
-    # single LLM batch are correctly counted (not just the baseline).
     allowed_calls: list[ToolCall] = []
     batch_counts: dict[str, int] = {}
     for tc in all_calls:
@@ -231,9 +244,11 @@ async def _process_tool_calls(
                 success=False,
                 error=limit_msg,
             )
+            await _record_tool(recorder, tc, limit_result, iteration)
             await _notify_tool(observer, tc, limit_result, iteration, warnings)
             result_msg = strategy.format_tool_result(limit_result)
             history.append(result_msg)
+            await _record_message(recorder, result_msg, iteration)
             await _notify_message(observer, result_msg, iteration, warnings)
             all_results.append((tc, limit_result))
         else:
@@ -251,19 +266,21 @@ async def _process_tool_calls(
             pending_calls.append(tc)
 
     # --- Phase 3: Execute server tools ---
-    # Parallel where safe, sequential barriers.
     exec_groups = _build_execution_groups(server_calls, lookups.parallel)
     executed: list[tuple[ToolCall, ToolResult]] = []
     for group, is_parallel in exec_groups:
         if is_parallel and len(group) > 1:
             pairs = await asyncio.gather(*[
-                _execute_and_notify(tc, lookups, observer, iteration, warnings)
+                _execute_record_notify(
+                    tc, lookups, recorder, observer, iteration, warnings,
+                )
                 for tc in group
             ])
             executed.extend(pairs)
         else:
             for tc in group:
                 tool_result = await _execute_tool(tc, lookups)
+                await _record_tool(recorder, tc, tool_result, iteration)
                 await _notify_tool(observer, tc, tool_result, iteration, warnings)
                 executed.append((tc, tool_result))
 
@@ -272,6 +289,7 @@ async def _process_tool_calls(
         call_counts[tc.name] = call_counts.get(tc.name, 0) + 1
         result_msg = strategy.format_tool_result(tool_result)
         history.append(result_msg)
+        await _record_message(recorder, result_msg, iteration)
         await _notify_message(observer, result_msg, iteration, warnings)
         all_results.append((tc, tool_result))
 
@@ -302,6 +320,7 @@ class ReActLoop(Loop):
         strategy: Strategy,
         user_input: str,
         run_id: str | None = None,
+        recorder: LoopRecorder | None = None,
         observer: LoopObserver | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
@@ -315,7 +334,7 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, observer=observer,
+            user_input=user_input, recorder=recorder, observer=observer,
             initial_history=initial_history, initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
@@ -333,6 +352,10 @@ class ReActLoop(Loop):
             t0 = time.monotonic()
             response = await provider.complete(messages, tools=tools, **_pkw)
             llm_duration_ms = int((time.monotonic() - t0) * 1000)
+            await _record_llm(
+                recorder, response, iteration,
+                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+            )
             await _notify_llm(
                 observer, response, iteration, observer_warnings,
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
@@ -343,7 +366,9 @@ class ReActLoop(Loop):
             steps.append(step)
 
             if isinstance(step.action, Finish):
-                await _append_assistant(response, history, observer, iteration, observer_warnings)
+                await _append_assistant(
+                    response, history, recorder, observer, iteration, observer_warnings,
+                )
                 meta = {"observer_warnings": observer_warnings} if observer_warnings else {}
                 return RunResult(
                     run_id=resolved_run_id, status=RunStatus.SUCCESS,
@@ -352,7 +377,9 @@ class ReActLoop(Loop):
                 )
 
             if isinstance(step.action, Clarification):
-                await _append_assistant(response, history, observer, iteration, observer_warnings)
+                await _append_assistant(
+                    response, history, recorder, observer, iteration, observer_warnings,
+                )
                 pause = _build_pause(
                     agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
                     history=history, steps=steps, iteration=iteration, usage=total_usage,
@@ -367,11 +394,13 @@ class ReActLoop(Loop):
                 )
 
             if isinstance(step.action, ToolCall):
-                await _append_assistant(response, history, observer, iteration, observer_warnings)
+                await _append_assistant(
+                    response, history, recorder, observer, iteration, observer_warnings,
+                )
                 outcome = await _process_tool_calls(
                     step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, observer=observer, iteration=iteration,
-                    history=history, warnings=observer_warnings,
+                    strategy=strategy, recorder=recorder, observer=observer,
+                    iteration=iteration, history=history, warnings=observer_warnings,
                 )
                 if outcome.pending_calls:
                     pause = _build_pause(
@@ -403,6 +432,7 @@ class ReActLoop(Loop):
         strategy: Strategy,
         user_input: str,
         run_id: str | None = None,
+        recorder: LoopRecorder | None = None,
         observer: LoopObserver | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
@@ -422,7 +452,7 @@ class ReActLoop(Loop):
         tool_defs = agent.get_tool_defs()
         lookups = _build_tool_lookups(agent.tools)
         state = await _init_loop_state(
-            user_input=user_input, observer=observer,
+            user_input=user_input, recorder=recorder, observer=observer,
             initial_history=initial_history, initial_steps=initial_steps,
             initial_usage=initial_usage,
         )
@@ -467,6 +497,10 @@ class ReActLoop(Loop):
                     f"complete_stream() must yield StreamEvent(type=DONE, raw=LLMResponse)."
                 )
 
+            await _record_llm(
+                recorder, llm_response, iteration,
+                semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
+            )
             await _notify_llm(
                 observer, llm_response, iteration, observer_warnings,
                 semantic_messages=messages, semantic_tools=tools, duration_ms=llm_duration_ms,
@@ -478,7 +512,7 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Finish):
                 await _append_assistant(
-                    llm_response, history, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, observer, iteration, observer_warnings,
                 )
                 meta: dict[str, Any] = (
                     {"observer_warnings": observer_warnings} if observer_warnings else {}
@@ -495,7 +529,7 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, Clarification):
                 await _append_assistant(
-                    llm_response, history, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, observer, iteration, observer_warnings,
                 )
                 pause = _build_pause(
                     agent_name=agent.name, pending_calls=[], target_lookup=lookups.target,
@@ -516,14 +550,13 @@ class ReActLoop(Loop):
 
             if isinstance(step.action, ToolCall):
                 await _append_assistant(
-                    llm_response, history, observer, iteration, observer_warnings,
+                    llm_response, history, recorder, observer, iteration, observer_warnings,
                 )
                 outcome = await _process_tool_calls(
                     step=step, call_counts=call_counts, lookups=lookups,
-                    strategy=strategy, observer=observer, iteration=iteration,
-                    history=history, warnings=observer_warnings,
+                    strategy=strategy, recorder=recorder, observer=observer,
+                    iteration=iteration, history=history, warnings=observer_warnings,
                 )
-                # Yield TOOL_RESULT for each executed/limited tool
                 for tc, tool_result in outcome.all_results:
                     yield RunEvent(
                         type=RunEventType.TOOL_RESULT,
@@ -634,19 +667,21 @@ def _build_execution_groups(
     return groups
 
 
-async def _execute_and_notify(
+async def _execute_record_notify(
     tool_call: ToolCall,
     lookups: ToolLookups,
+    recorder: LoopRecorder | None,
     observer: LoopObserver | None,
     iteration: int,
     observer_warnings: list[str],
 ) -> tuple[ToolCall, ToolResult]:
-    """Execute a tool and notify observer immediately on completion.
+    """Execute a tool, record, then notify — for parallel execution.
 
-    Used for parallel execution — each tool streams its SSE event
-    as soon as it finishes, without waiting for siblings.
+    Each tool records and streams its event as soon as it finishes,
+    without waiting for siblings.
     """
     result = await _execute_tool(tool_call, lookups)
+    await _record_tool(recorder, tool_call, result, iteration)
     await _notify_tool(observer, tool_call, result, iteration, observer_warnings)
     return tool_call, result
 

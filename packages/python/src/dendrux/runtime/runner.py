@@ -10,9 +10,9 @@ agent config, and more loop types.
 
 Sprint 2 adds optional state_store for persistence. When provided:
   - Runner owns the run_id (generates it, passes to loop)
-  - PersistenceObserver records traces, tool calls, and usage
+  - PersistenceRecorder records traces, tool calls, and usage (fail-closed)
   - finalize_run() is called in try/finally to guarantee persistence
-  - Observer failures are logged, never kill the run
+  - Developer's extra_observer is passed separately (best-effort)
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import Loop, LoopObserver
+    from dendrux.loops.base import Loop, LoopObserver, LoopRecorder
     from dendrux.runtime.state import StateStore
     from dendrux.strategies.base import Strategy
     from dendrux.types import Message, RunEvent, RunResult, RunStream, ToolResult
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 class EventSequencer:
     """Monotonic sequence counter for run_events within a single run.
 
-    Shared between the runner (run-level events) and the PersistenceObserver
+    Shared between the runner (run-level events) and the PersistenceRecorder
     (loop-level events) to guarantee a globally unique, ordered sequence_index
     per run — including across pause/resume boundaries.
 
@@ -259,7 +259,7 @@ async def run(
     provider_kwargs = dict(kwargs) if kwargs else {}
 
     run_id = generate_ulid()
-    observer: LoopObserver | None = None
+    recorder: LoopRecorder | None = None
     sequencer = EventSequencer()
 
     # --- Delegation context ---
@@ -286,15 +286,15 @@ async def run(
             meta=run_meta,
         )
 
-        # Create persistence observer with shared sequencer
-        from dendrux.runtime.observer import PersistenceObserver
+        # Create persistence recorder with shared sequencer
+        from dendrux.runtime.persistence import PersistenceRecorder
         from dendrux.tool import get_tool_def
 
         target_lookup = {}
         for fn in agent.tools:
             td = get_tool_def(fn)
             target_lookup[td.name] = td.target
-        observer = PersistenceObserver(
+        recorder = PersistenceRecorder(
             state_store,
             run_id,
             model=provider.model,
@@ -303,16 +303,6 @@ async def run(
             redact=redact,
             event_sequencer=sequencer,
         )
-
-    # Compose with extra observer (e.g. ConsoleObserver, TransportObserver)
-    composed_observer = observer
-    if extra_observer is not None:
-        from dendrux.observers.composite import CompositeObserver
-
-        if observer is not None:
-            composed_observer = CompositeObserver([observer, extra_observer])
-        else:
-            composed_observer = extra_observer
 
     await _emit_event(
         state_store,
@@ -340,7 +330,8 @@ async def run(
             strategy=resolved_strategy,
             user_input=user_input,
             run_id=run_id,
-            observer=composed_observer,
+            recorder=recorder,
+            observer=extra_observer,
             provider_kwargs=provider_kwargs or None,
         )
 
@@ -549,7 +540,7 @@ def run_stream(
                 max_delegation_depth, parent_ctx
             )
 
-            observer: LoopObserver | None = None
+            recorder: LoopRecorder | None = None
 
             if store is not None:
                 redacted_input = redact(user_input) if redact else user_input
@@ -569,14 +560,14 @@ def run_stream(
                     meta=run_meta,
                 )
 
-                from dendrux.runtime.observer import PersistenceObserver
+                from dendrux.runtime.persistence import PersistenceRecorder
                 from dendrux.tool import get_tool_def
 
                 target_lookup = {}
                 for fn in agent.tools:
                     td = get_tool_def(fn)
                     target_lookup[td.name] = td.target
-                observer = PersistenceObserver(
+                recorder = PersistenceRecorder(
                     store,
                     run_id,
                     model=provider.model,
@@ -585,15 +576,6 @@ def run_stream(
                     redact=redact,
                     event_sequencer=sequencer,
                 )
-
-            composed_observer = observer
-            if extra_observer is not None:
-                from dendrux.observers.composite import CompositeObserver
-
-                if observer is not None:
-                    composed_observer = CompositeObserver([observer, extra_observer])
-                else:
-                    composed_observer = extra_observer
 
             # 2. Set delegation context for the generator lifetime
             this_ctx = DelegationContext(
@@ -623,7 +605,8 @@ def run_stream(
                 strategy=resolved_strategy,
                 user_input=user_input,
                 run_id=run_id,
-                observer=composed_observer,
+                recorder=recorder,
+                observer=extra_observer,
                 provider_kwargs=provider_kwargs or None,
             ):
                 # Persist loop outcomes before forwarding
@@ -844,7 +827,7 @@ class _ResumeContext:
     """
 
     __slots__ = (
-        "history", "observer", "sequencer", "pause_state",
+        "history", "recorder", "observer", "sequencer", "pause_state",
         "resolved_loop", "resolved_strategy",
     )
 
@@ -852,13 +835,15 @@ class _ResumeContext:
         self,
         *,
         history: list[Message],
-        observer: LoopObserver,
+        recorder: LoopRecorder,
+        observer: LoopObserver | None,
         sequencer: EventSequencer,
         pause_state: PauseState,
         resolved_loop: Loop,
         resolved_strategy: Strategy,
     ) -> None:
         self.history = history
+        self.recorder = recorder
         self.observer = observer
         self.sequencer = sequencer
         self.pause_state = pause_state
@@ -891,10 +876,10 @@ async def _prepare_resume(
       1. Initialize sequencer from DB (continues across pause boundaries)
       2. Record durable run.resumed event
       3. Build resume history (inject tool results or user input)
-      4. Create observer with correct trace offset
-      5. Notify observer of injected messages
+      4. Create recorder with correct trace offset
+      5. Notify recorder of injected messages
     """
-    from dendrux.runtime.observer import PersistenceObserver
+    from dendrux.runtime.persistence import PersistenceRecorder
     from dendrux.tool import get_tool_def
     from dendrux.types import Message, Role
 
@@ -932,7 +917,7 @@ async def _prepare_resume(
     elif user_input is not None:
         history.append(Message(role=Role.USER, content=user_input))
 
-    # 4. Create observer with correct trace offset
+    # 4. Create recorder with correct trace offset
     traces = await state_store.get_traces(run_id)
     trace_order_offset = max((t.order_index for t in traces), default=-1) + 1
 
@@ -940,7 +925,7 @@ async def _prepare_resume(
     for fn in agent.tools:
         td = get_tool_def(fn)
         target_lookup[td.name] = td.target
-    persistence_obs = PersistenceObserver(
+    recorder = PersistenceRecorder(
         state_store,
         run_id,
         model=provider.model,
@@ -951,27 +936,31 @@ async def _prepare_resume(
         event_sequencer=sequencer,
     )
 
-    observer: LoopObserver
-    if extra_observer is not None:
-        from dendrux.observers.composite import CompositeObserver
+    # 5. Record + notify injected messages and tool completions
+    #    Recorder is fail-closed (exceptions propagate).
+    #    Observer is best-effort (swallowed via notify helpers).
+    from dendrux.loops._helpers import notify_message as _notify_msg
+    from dendrux.loops._helpers import notify_tool as _notify_tool
 
-        observer = CompositeObserver([persistence_obs, extra_observer])
-    else:
-        observer = persistence_obs
-
-    # 5. Notify observer of injected messages and tool completions
     if tool_results is not None:
         pending_by_id = {tc.id: tc for tc in pause_state.pending_tool_calls}
         injected_start = len(pause_state.history)
         for i, tr in enumerate(tool_results):
-            await observer.on_message_appended(history[injected_start + i], pause_state.iteration)
-            await observer.on_tool_completed(pending_by_id[tr.call_id], tr, pause_state.iteration)
+            msg = history[injected_start + i]
+            tc = pending_by_id[tr.call_id]
+            await recorder.on_message_appended(msg, pause_state.iteration)
+            await recorder.on_tool_completed(tc, tr, pause_state.iteration)
+            await _notify_msg(extra_observer, msg, pause_state.iteration)
+            await _notify_tool(extra_observer, tc, tr, pause_state.iteration)
     elif user_input is not None:
-        await observer.on_message_appended(history[-1], pause_state.iteration)
+        msg = history[-1]
+        await recorder.on_message_appended(msg, pause_state.iteration)
+        await _notify_msg(extra_observer, msg, pause_state.iteration)
 
     return _ResumeContext(
         history=history,
-        observer=observer,
+        recorder=recorder,
+        observer=extra_observer,
         sequencer=sequencer,
         pause_state=pause_state,
         resolved_loop=resolved_loop,
@@ -998,7 +987,9 @@ async def _resume_core(
 
     Args:
         extra_observer: Optional additional LoopObserver (e.g. TransportObserver)
-            to compose with the PersistenceObserver for SSE streaming during resume.
+            for SSE streaming during resume. Passed separately from the
+            PersistenceRecorder — recorder handles persistence, observer handles
+            notifications.
         _skip_claim: Internal flag — skip the atomic claim step when the caller
             has already claimed via submit_and_claim(). Used by resume_claimed().
     """
@@ -1079,6 +1070,7 @@ async def _resume_core(
             strategy=ctx.resolved_strategy,
             user_input="",
             run_id=run_id,
+            recorder=ctx.recorder,
             observer=ctx.observer,
             initial_history=ctx.history,
             initial_steps=ctx.pause_state.steps,
@@ -1278,6 +1270,7 @@ def resume_stream(
                 strategy=ctx.resolved_strategy,
                 user_input="",
                 run_id=run_id,
+                recorder=ctx.recorder,
                 observer=ctx.observer,
                 initial_history=ctx.history,
                 initial_steps=ctx.pause_state.steps,

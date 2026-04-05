@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from dendrux.loops._helpers import notify_llm, notify_message
+from dendrux.loops._helpers import notify_llm, notify_message, record_llm, record_message
 from dendrux.loops.base import Loop
 from dendrux.types import (
     Message,
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
     from dendrux.agent import Agent
     from dendrux.llm.base import LLMProvider
-    from dendrux.loops.base import LoopObserver
+    from dendrux.loops.base import LoopObserver, LoopRecorder
     from dendrux.strategies.base import Strategy
     from dendrux.types import AgentStep, LLMResponse
 
@@ -72,6 +72,7 @@ class SingleCall(Loop):
         strategy: Strategy,
         user_input: str,
         run_id: str | None = None,
+        recorder: LoopRecorder | None = None,
         observer: LoopObserver | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
@@ -80,7 +81,6 @@ class SingleCall(Loop):
         provider_kwargs: dict[str, Any] | None = None,
     ) -> RunResult:
         """Execute a single LLM call and return the result."""
-        # SingleCall never pauses, so resume is a logic error.
         is_resume = (
             initial_history is not None
             or initial_steps
@@ -98,22 +98,19 @@ class SingleCall(Loop):
         resolved_run_id = run_id or generate_ulid()
         _pkw = provider_kwargs or {}
 
-        # Build history
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
+        await record_message(recorder, user_msg, 0)
         await notify_message(observer, user_msg, 0)
 
-        # Build messages via strategy (no tools)
         messages, _tools = strategy.build_messages(
             system_prompt=agent.prompt, history=history, tool_defs=[],
         )
 
-        # Single LLM call
         t0 = time.monotonic()
         response = await provider.complete(messages, tools=None, **_pkw)
         llm_duration_ms = int((time.monotonic() - t0) * 1000)
 
-        # Guard: provider should not return tool_calls when no tools are sent
         if response.tool_calls:
             raise RuntimeError(
                 f"SingleCall received unexpected tool_calls from provider "
@@ -121,15 +118,20 @@ class SingleCall(Loop):
                 f"have zero tools — the provider should not produce tool calls."
             )
 
+        await record_llm(
+            recorder, response, 1,
+            semantic_messages=messages, semantic_tools=None,
+            duration_ms=llm_duration_ms,
+        )
         await notify_llm(
             observer, response, 1,
             semantic_messages=messages, semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
 
-        # Record assistant message
         assistant_msg = Message(role=Role.ASSISTANT, content=response.text or "")
         history.append(assistant_msg)
+        await record_message(recorder, assistant_msg, 1)
         await notify_message(observer, assistant_msg, 1)
 
         usage = UsageStats(
@@ -156,6 +158,7 @@ class SingleCall(Loop):
         strategy: Strategy,
         user_input: str,
         run_id: str | None = None,
+        recorder: LoopRecorder | None = None,
         observer: LoopObserver | None = None,
         initial_history: list[Message] | None = None,
         initial_steps: list[AgentStep] | None = None,
@@ -169,7 +172,6 @@ class SingleCall(Loop):
         is built from the final DONE event's LLMResponse, not from
         concatenated deltas.
         """
-        # SingleCall never pauses, so resume is a logic error.
         is_resume = (
             initial_history is not None
             or initial_steps
@@ -187,17 +189,15 @@ class SingleCall(Loop):
         resolved_run_id = run_id or generate_ulid()
         _pkw = provider_kwargs or {}
 
-        # Build history
         user_msg = Message(role=Role.USER, content=user_input)
         history = [user_msg]
+        await record_message(recorder, user_msg, 0)
         await notify_message(observer, user_msg, 0)
 
-        # Build messages via strategy (no tools)
         messages, _tools = strategy.build_messages(
             system_prompt=agent.prompt, history=history, tool_defs=[],
         )
 
-        # Stream LLM call
         t0 = time.monotonic()
         llm_response: LLMResponse | None = None
         provider_stream = provider.complete_stream(messages, tools=None, **_pkw)
@@ -224,7 +224,6 @@ class SingleCall(Loop):
                 "complete_stream() must yield StreamEvent(type=DONE, raw=LLMResponse)."
             )
 
-        # Guard: provider should not return tool_calls
         if llm_response.tool_calls:
             raise RuntimeError(
                 f"SingleCall received unexpected tool_calls from provider "
@@ -232,15 +231,20 @@ class SingleCall(Loop):
                 f"have zero tools — the provider should not produce tool calls."
             )
 
+        await record_llm(
+            recorder, llm_response, 1,
+            semantic_messages=messages, semantic_tools=None,
+            duration_ms=llm_duration_ms,
+        )
         await notify_llm(
             observer, llm_response, 1,
             semantic_messages=messages, semantic_tools=None,
             duration_ms=llm_duration_ms,
         )
 
-        # Record assistant message
         assistant_msg = Message(role=Role.ASSISTANT, content=llm_response.text or "")
         history.append(assistant_msg)
+        await record_message(recorder, assistant_msg, 1)
         await notify_message(observer, assistant_msg, 1)
 
         usage = UsageStats(
