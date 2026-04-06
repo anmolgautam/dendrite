@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tools.firecrawl_tools import firecrawl_search
+
 from dendrux import Agent
 from dendrux.llm.anthropic import AnthropicProvider
-
-from tools.firecrawl_tools import firecrawl_search
 
 DB_PATH = Path(__file__).parents[1] / "research.db"
 DB_URL = f"sqlite+aiosqlite:///{DB_PATH}"

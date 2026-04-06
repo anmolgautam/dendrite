@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 
-from dendrux import tool
 from firecrawl import Firecrawl
+
+from dendrux import tool
 
 
 def _get_client() -> Firecrawl:

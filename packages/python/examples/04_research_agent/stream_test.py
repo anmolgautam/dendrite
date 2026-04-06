@@ -14,14 +14,13 @@ import asyncio
 import sys
 from pathlib import Path
 
+from agents.scrape_agent import run_scrape
+from agents.search_agent import run_search
 from dotenv import load_dotenv
 
 from dendrux import Agent, tool
 from dendrux.llm.anthropic import AnthropicProvider
 from dendrux.types import RunEventType
-
-from agents.search_agent import run_search
-from agents.scrape_agent import run_scrape
 
 load_dotenv()
 
@@ -68,7 +67,7 @@ Keep the report under 500 words. Cite sources.
 async def main() -> None:
     topic = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
     if not topic:
-        print("Usage: python stream_test.py \"your topic\"")
+        print('Usage: python stream_test.py "your topic"')
         sys.exit(1)
 
     print(f"Researching: {topic}")
