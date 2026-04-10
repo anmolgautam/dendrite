@@ -92,5 +92,23 @@ class TransportNotifier(LoopNotifier):
             )
         )
 
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None:
+        await self._queue.put(
+            ServerEvent(
+                event="run.governance",
+                data={
+                    "event_type": event_type,
+                    "iteration": iteration,
+                    **data,
+                },
+            )
+        )
+
 
 __all__ = ["CompositeNotifier", "ServerEvent", "TransportNotifier"]

@@ -14,7 +14,7 @@ At each event point, the loop calls record first, then notify.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dendrux.loops.base import LoopNotifier, LoopRecorder
@@ -70,6 +70,19 @@ async def record_tool(
     if recorder is None:
         return
     await recorder.on_tool_completed(tool_call, tool_result, iteration)
+
+
+async def record_governance(
+    recorder: LoopRecorder | None,
+    event_type: str,
+    iteration: int,
+    data: dict[str, Any],
+    correlation_id: str | None = None,
+) -> None:
+    """Record governance event to authoritative persistence. Exceptions propagate."""
+    if recorder is None:
+        return
+    await recorder.on_governance_event(event_type, iteration, data, correlation_id=correlation_id)
 
 
 # ------------------------------------------------------------------
@@ -137,3 +150,24 @@ async def notify_tool(
         logger.warning("Notifier.on_tool_completed failed", exc_info=True)
         if warnings is not None:
             warnings.append(f"on_tool_completed failed at iteration {iteration}")
+
+
+async def notify_governance(
+    notifier: LoopNotifier | None,
+    event_type: str,
+    iteration: int,
+    data: dict[str, Any],
+    correlation_id: str | None = None,
+    warnings: list[str] | None = None,
+) -> None:
+    """Notify notifier of a governance event, swallowing exceptions."""
+    if notifier is None:
+        return
+    try:
+        await notifier.on_governance_event(
+            event_type, iteration, data, correlation_id=correlation_id
+        )
+    except Exception:
+        logger.warning("Notifier.on_governance_event failed", exc_info=True)
+        if warnings is not None:
+            warnings.append(f"on_governance_event failed at iteration {iteration}")

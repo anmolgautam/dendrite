@@ -333,3 +333,18 @@ class PersistenceRecorder(LoopRecorder):
             await self._store.touch_progress(self._run_id)
         except Exception:
             logger.warning("Failed to touch progress for run %s", self._run_id, exc_info=True)
+
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None:
+        """Record a governance event. FAIL-CLOSED with retry."""
+        await self._emit_event(
+            event_type,
+            iteration,
+            data=data,
+            correlation_id=correlation_id,
+        )

@@ -73,6 +73,14 @@ class LoopRecorder(Protocol):
         self, tool_call: ToolCall, tool_result: ToolResult, iteration: int
     ) -> None: ...
 
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None: ...
+
 
 # ------------------------------------------------------------------
 # Public: best-effort notifications (exceptions swallowed)
@@ -129,6 +137,26 @@ class LoopNotifier(Protocol):
 
         Consumes tool_result.duration_ms — no re-timing. Records both
         tool_call.id (Dendrux ULID) and tool_call.provider_tool_call_id.
+        """
+        ...
+
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None:
+        """Called when a governance action fires (deny, approval, budget, guardrail).
+
+        Implementations decide what to do: log, emit metrics, stream to SSE, etc.
+        Best-effort — failures must not kill agent runs.
+
+        Args:
+            event_type: Stable string like ``policy.denied``, ``approval.requested``.
+            iteration: Current loop iteration.
+            data: Structured payload (tool_name, reason, etc.).
+            correlation_id: Optional join key (e.g. tool call ID for dashboard joins).
         """
         ...
 

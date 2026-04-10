@@ -27,9 +27,11 @@ import time
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from dendrux.loops._helpers import (
+    notify_governance,
     notify_llm,
     notify_message,
     notify_tool,
+    record_governance,
     record_llm,
     record_message,
     record_tool,
@@ -72,9 +74,11 @@ logger = logging.getLogger(__name__)
 _record_message = record_message
 _record_llm = record_llm
 _record_tool = record_tool
+_record_governance = record_governance
 _notify_message = notify_message
 _notify_llm = notify_llm
 _notify_tool = notify_tool
+_notify_governance = notify_governance
 
 
 class _ToolCallOutcome(NamedTuple):
@@ -217,6 +221,7 @@ async def _process_tool_calls(
     iteration: int,
     history: list[Message],
     warnings: list[str],
+    deny: frozenset[str] | None = None,
 ) -> _ToolCallOutcome:
     """Execute tool calls: enforce limits, run server tools, update history.
 
@@ -228,11 +233,50 @@ async def _process_tool_calls(
     """
     all_calls: list[ToolCall] = step.meta.get("all_tool_calls", [step.action])
     all_results: list[tuple[ToolCall, ToolResult]] = []
+    deny_set = deny or frozenset()
+
+    # --- Phase 0: Deny check (governance) ---
+    non_denied: list[ToolCall] = []
+    for tc in all_calls:
+        if tc.name in deny_set:
+            deny_msg = f"Tool '{tc.name}' is denied by policy."
+            deny_result = ToolResult(
+                name=tc.name,
+                call_id=tc.id,
+                payload=json.dumps({"denied": deny_msg}),
+                success=False,
+                error=deny_msg,
+            )
+            # No _record_tool / _notify_tool — denied tools are not executions.
+            # Only policy.denied event + synthetic message for the model.
+            event_data = {
+                "tool_name": tc.name,
+                "call_id": tc.id,
+                "reason": "denied_by_policy",
+            }
+            await _record_governance(
+                recorder, "policy.denied", iteration, event_data, correlation_id=tc.id
+            )
+            await _notify_governance(
+                notifier,
+                "policy.denied",
+                iteration,
+                event_data,
+                correlation_id=tc.id,
+                warnings=warnings,
+            )
+            result_msg = strategy.format_tool_result(deny_result)
+            history.append(result_msg)
+            await _record_message(recorder, result_msg, iteration)
+            await _notify_message(notifier, result_msg, iteration, warnings)
+            all_results.append((tc, deny_result))
+        else:
+            non_denied.append(tc)
 
     # --- Phase 1: Enforce max_calls_per_run ---
     allowed_calls: list[ToolCall] = []
     batch_counts: dict[str, int] = {}
-    for tc in all_calls:
+    for tc in non_denied:
         max_calls = lookups.max_calls.get(tc.name)
         current = call_counts.get(tc.name, 0) + batch_counts.get(tc.name, 0)
         if max_calls is not None and current >= max_calls:
@@ -459,6 +503,7 @@ class ReActLoop(Loop):
                     iteration=iteration,
                     history=history,
                     warnings=notifier_warnings,
+                    deny=agent.deny,
                 )
                 if outcome.pending_calls:
                     pause = _build_pause(
@@ -676,6 +721,7 @@ class ReActLoop(Loop):
                     iteration=iteration,
                     history=history,
                     warnings=notifier_warnings,
+                    deny=agent.deny,
                 )
                 for tc, tool_result in outcome.all_results:
                     yield RunEvent(

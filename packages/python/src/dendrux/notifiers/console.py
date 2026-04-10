@@ -131,6 +131,21 @@ class ConsoleNotifier(LoopNotifier):
                     f"  [red]  fail[/red]    [bold]{tool_call.name}[/bold]{duration_str}"
                 )
 
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None:
+        """Called when a governance action fires."""
+        tool_name = data.get("tool_name", "")
+        reason = data.get("reason", event_type)
+        _console.print(
+            f"  [bright_magenta]  policy[/bright_magenta] [bold]{tool_name}[/bold]"
+            f" [dim]{reason}[/dim]"
+        )
+
     def print_summary(self, result: RunResult) -> None:
         """Print a final summary panel. Call after agent.run() completes."""
         total_time = time.monotonic() - self._run_start if self._run_start else 0

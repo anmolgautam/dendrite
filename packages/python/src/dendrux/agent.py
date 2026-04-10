@@ -105,6 +105,7 @@ class Agent:
         database_options: dict[str, Any] | None = ...,
         state_store: StateStore | None = ...,
         redact: Callable[[str], str] | None = ...,
+        deny: list[str] | None = ...,
     ) -> None: ...
 
     @overload
@@ -123,6 +124,7 @@ class Agent:
         database_options: dict[str, Any] | None = ...,
         state_store: StateStore | None = ...,
         redact: Callable[[str], str] | None = ...,
+        deny: list[str] | None = ...,
     ) -> None: ...
 
     def __init__(
@@ -140,6 +142,7 @@ class Agent:
         database_options: dict[str, Any] | None = None,
         state_store: StateStore | None = None,
         redact: Callable[[str], str] | None = None,
+        deny: list[str] | None = None,
     ) -> None:
         # --- Subclass guard: block class-level provider ---
         from dendrux.llm.base import LLMProvider as _LLMBase
@@ -188,6 +191,7 @@ class Agent:
         self._database_options = database_options or {}
         self._state_store = state_store
         self._redact = redact
+        self._deny: frozenset[str] = frozenset(deny) if deny else frozenset()
         self._lazy_store: StateStore | None = None
         self._private_engine: AsyncEngine | None = None
 
@@ -213,6 +217,11 @@ class Agent:
     def output_type(self) -> type[BaseModel] | None:
         """The default output type for structured output, or None."""
         return self._output_type
+
+    @property
+    def deny(self) -> frozenset[str]:
+        """Tool names denied by policy. Empty frozenset if none."""
+        return self._deny
 
     @property
     def provider(self) -> LLMProvider | None:
@@ -296,6 +305,30 @@ class Agent:
                 f"Agent '{self.name}' max_iterations cannot exceed "
                 f"{MAX_ITERATIONS_CEILING}, got {self.max_iterations}."
             )
+
+        # --- deny= validation ---
+        if self._deny:
+            # deny requires tools
+            if not self.tools:
+                raise ValueError(f"Agent '{self.name}' has deny={sorted(self._deny)} but no tools.")
+
+            # deny + SingleCall is not supported
+            if isinstance(self._loop, SingleCall):
+                raise ValueError(
+                    f"Agent '{self.name}' has deny={sorted(self._deny)} but uses "
+                    f"SingleCall loop. deny is not supported with SingleCall."
+                )
+
+            # every name in deny must exist in tools
+            known_tools: frozenset[str] = frozenset(
+                str(getattr(fn, "__name__", fn)) for fn in self.tools
+            )
+            unknown = self._deny - known_tools
+            if unknown:
+                raise ValueError(
+                    f"Agent '{self.name}' deny contains unknown tool(s): "
+                    f"{sorted(unknown)}. Available tools: {sorted(known_tools)}."
+                )
 
     # ------------------------------------------------------------------
     # Persistence (lazy init)

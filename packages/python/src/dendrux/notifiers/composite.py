@@ -7,7 +7,7 @@ so it can be used in script-mode runs without requiring FastAPI.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from dendrux.loops.base import LoopNotifier
 
@@ -63,3 +63,18 @@ class CompositeNotifier(LoopNotifier):
                 await notifier.on_tool_completed(tool_call, tool_result, iteration)
             except Exception:
                 logger.warning("CompositeNotifier: on_tool_completed failed", exc_info=True)
+
+    async def on_governance_event(
+        self,
+        event_type: str,
+        iteration: int,
+        data: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> None:
+        for notifier in self._notifiers:
+            try:
+                await notifier.on_governance_event(
+                    event_type, iteration, data, correlation_id=correlation_id
+                )
+            except Exception:
+                logger.warning("CompositeNotifier: on_governance_event failed", exc_info=True)
