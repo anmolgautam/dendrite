@@ -46,6 +46,20 @@ ANTHROPIC_API_KEY=sk-... python my_agent.py
 
 Three concepts: `Agent`, `@tool()`, provider. Everything else is opt-in.
 
+Production agent in 10 lines. Add PII redaction, tool deny, human approval, and budget tracking in 5 more:
+
+```python
+agent = Agent(
+    provider=provider,
+    tools=[search, refund, delete_account],
+    prompt="You are a customer support agent.",
+    deny=["delete_account"],
+    require_approval=["refund"],
+    budget=Budget(max_tokens=30_000),
+    guardrails=[PII(), SecretDetection(action="block")],
+)
+```
+
 ---
 
 ## Install
