@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,6 +10,11 @@ from typer.testing import CliRunner
 from dendrux.cli.main import _resolve_db_url, app
 
 runner = CliRunner()
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 class TestResolveDbUrl:
@@ -53,15 +59,17 @@ class TestDashboardCommand:
 
     def test_dashboard_help_shows_db_option(self) -> None:
         """--db flag appears in the dashboard help text."""
-        result = runner.invoke(app, ["dashboard", "--help"], color=False)
+        result = runner.invoke(app, ["dashboard", "--help"])
+        output = _strip_ansi(result.output)
         assert result.exit_code == 0
-        assert "--db" in result.output
-        assert "Database URL or SQLite file path" in result.output
+        assert "--db" in output
+        assert "Database URL or SQLite file path" in output
 
     def test_dashboard_help_shows_examples(self) -> None:
         """Dashboard docstring examples are visible in help."""
-        result = runner.invoke(app, ["dashboard", "--help"], color=False)
-        assert "--db ./my-agent.db" in result.output
+        result = runner.invoke(app, ["dashboard", "--help"])
+        output = _strip_ansi(result.output)
+        assert "--db ./my-agent.db" in output
 
     def test_resolve_db_url_used_in_dashboard(self) -> None:
         """_resolve_db_url is called from the dashboard code path.
