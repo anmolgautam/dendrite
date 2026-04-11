@@ -53,14 +53,14 @@ class TestDashboardCommand:
 
     def test_dashboard_help_shows_db_option(self) -> None:
         """--db flag appears in the dashboard help text."""
-        result = runner.invoke(app, ["dashboard", "--help"])
+        result = runner.invoke(app, ["dashboard", "--help"], color=False)
         assert result.exit_code == 0
         assert "--db" in result.output
         assert "Database URL or SQLite file path" in result.output
 
     def test_dashboard_help_shows_examples(self) -> None:
         """Dashboard docstring examples are visible in help."""
-        result = runner.invoke(app, ["dashboard", "--help"])
+        result = runner.invoke(app, ["dashboard", "--help"], color=False)
         assert "--db ./my-agent.db" in result.output
 
     def test_resolve_db_url_used_in_dashboard(self) -> None:
