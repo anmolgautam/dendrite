@@ -69,17 +69,18 @@ pip install -e ".[dev,all]"
 
 ---
 
-## Five Pillars
+## Six Pillars
 
-Dendrux is built around five design commitments:
+Dendrux is built around six design commitments:
 
 | # | Pillar | What it means |
 |---|--------|---------------|
 | 1 | **Survive failure** | Durable writes, sweep, retry, idempotency. Runs never lie about state. |
 | 2 | **Control execution** | Tool constraints, timeouts, parallel/sequential policy, delegation depth guards. |
-| 3 | **Explain everything** | Every LLM call, tool execution, pause, and lifecycle event is persisted as evidence. |
-| 4 | **Coordinate agents** | Parent-child delegation with automatic linking, depth guards, and lifecycle coupling. |
-| 5 | **Pause for the real world** | Client-tool bridge for spreadsheets, browsers, and desktops with domain-aware constraints. |
+| 3 | **Govern behavior** | Tool deny/approval, advisory budgets, PII redaction, secret detection. Four layers of runtime governance. |
+| 4 | **Explain everything** | Every LLM call, tool execution, pause, and lifecycle event is persisted as evidence. |
+| 5 | **Coordinate agents** | Parent-child delegation with automatic linking, depth guards, and lifecycle coupling. |
+| 6 | **Pause for the real world** | Client-tool bridge for spreadsheets, browsers, and desktops with domain-aware constraints. |
 
 ---
 
@@ -141,6 +142,69 @@ async def write_to_db(data: str) -> str: ...
 ```
 
 **Delegation depth guards**: nested agent calls are tracked automatically. Runaway recursion is caught and stopped.
+
+### 🔐 Govern Behavior
+
+Four layers of runtime governance, all opt-in via kwargs on `Agent`:
+
+```python
+from dendrux import Agent, Budget
+from dendrux.guardrails import PII, SecretDetection, Pattern
+
+agent = Agent(
+    provider=provider,
+    tools=[search, refund, delete_account],
+    prompt="You are a customer support agent.",
+    deny=["delete_account"],                     # block tools deterministically
+    require_approval=["refund"],                 # pause for human sign-off
+    budget=Budget(max_tokens=30_000),            # advisory spend tracking
+    guardrails=[                                 # content scanning at LLM boundary
+        PII(extra_patterns=[Pattern("EMPLOYEE_ID", r"EMP-\d{6}")]),
+        SecretDetection(action="block"),
+    ],
+)
+```
+
+**Tool deny**: `deny=["tool_name"]` blocks tools deterministically. The model gets a synthesized error and adapts. The tool never executes.
+
+**Approval (HITL)**: `require_approval=["tool_name"]` pauses the run for human sign-off. Approve with `agent.resume(run_id)`, reject with `agent.resume(run_id, tool_results=[...])`.
+
+**Advisory budget**: `budget=Budget(max_tokens=N)` fires governance events at configurable thresholds (50%, 75%, 90%) and when usage exceeds the cap. Advisory only - the run continues. Developers observe and act.
+
+**Guardrails**: `guardrails=[PII(), SecretDetection()]` scans content crossing the LLM boundary. Three actions:
+- `redact` - PII replaced with `<<EMAIL_1>>` placeholders. Tools receive real values (deanonymized). Run-scoped mapping persisted for audit.
+- `block` - run terminates immediately. The LLM never sees the content.
+- `warn` - findings logged, content unchanged. Shadow rollout before promoting to redact.
+
+Custom patterns via `Pattern("NAME", r"regex")`. Extensible `Guardrail` protocol for custom scanners (async `scan()` supports LLM-as-judge). Regex in v1, Presidio upgrade path preserved.
+
+**Pipeline per iteration:**
+
+```
+                        ┌─────────────────┐
+  User Input ──────────▶│ Incoming Guard  │ scan all messages, redact / block / warn
+                        └────────┬────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │    LLM Call     │ model sees <<EMAIL_1>> placeholders
+                        └────────┬────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │  Output Guard   │ scan response text + tool call params
+                        └────────┬────────┘
+                                 ▼
+  ┌───────┐   ┌──────────────┐   ┌──────────┐   ┌─────────┐   ┌────────┐
+  │ Deny  │──▶│ Deanonymize  │──▶│ Approval │──▶│ Execute │──▶│ Budget │
+  └───────┘   └──────────────┘   └──────────┘   └─────────┘   └────────┘
+  block by    placeholders →     HITL           server /       advisory
+  policy      real values        sign-off       client tools   tracking
+
+  ─────────────────────────────────────────────────────────────────────────
+  Events: policy.denied │ approval.* │ budget.* │ guardrail.*
+  Recorder (fail-closed)  +  Notifier (best-effort)
+```
+
+All governance events flow through both the fail-closed recorder (DB audit trail) and best-effort notifier (console, SSE, custom).
 
 ### 🔍 Explain Everything
 
@@ -319,6 +383,13 @@ The dashboard shows runs, timelines, tool calls, token usage, delegation trees, 
 | [`08_streaming_openai_responses.py`](packages/python/examples/08_streaming_openai_responses.py) | OpenAI Responses API streaming |
 | [`09_client_tools_streaming/`](packages/python/examples/09_client_tools_streaming/) | Bridge + streaming combined |
 | [`10_single_call.py`](packages/python/examples/10_single_call.py) | One-shot LLM call, no loop |
+| [`11_structured_output.py`](packages/python/examples/11_structured_output.py) | Typed Pydantic models from LLM |
+| [`12_structured_output_stream.py`](packages/python/examples/12_structured_output_stream.py) | Structured output in streaming mode |
+| **Governance** | |
+| [`governance/01_tool_deny.py`](packages/python/examples/governance/01_tool_deny.py) | Block tools deterministically (batch + streaming) |
+| [`governance/02_approval.py`](packages/python/examples/governance/02_approval.py) | Human-in-the-loop approval with approve/reject CLI |
+| [`governance/03_budget.py`](packages/python/examples/governance/03_budget.py) | Advisory token budget with threshold warnings |
+| [`governance/04_guardrails.py`](packages/python/examples/governance/04_guardrails.py) | PII redaction, secret detection, warn mode |
 
 ```bash
 cd packages/python/examples
@@ -331,15 +402,15 @@ ANTHROPIC_API_KEY=sk-... python 01_hello_world.py
 
 | Metric | Value |
 |--------|-------|
-| Source code | 12,900+ lines |
-| Test code | 16,500+ lines |
-| Test functions | 773 |
-| Test-to-source ratio | 1.28 : 1 |
+| Source code | 14,500+ lines |
+| Test code | 18,000+ lines |
+| Test functions | 898 |
+| Test-to-source ratio | 1.24 : 1 |
 | Min coverage enforced | 80% |
 | Python versions tested | 3.11, 3.12, 3.13 |
 | CI checks | lint, format, types, tests |
-| Alembic migrations | 7 |
-| Examples | 10 runnable scripts |
+| Alembic migrations | 8 |
+| Examples | 16 runnable scripts |
 | Development started | March 11, 2026 |
 
 ---
@@ -359,11 +430,12 @@ Dendrux is in active development (`v0.1.0a4`). The core API is stabilizing. `Age
 | Retry terminal runs | Stabilizing |
 | Streaming (text + events) | Stabilizing |
 | Delegation context (parent-child linking) | Stabilizing |
+| Governance (deny, approval, budget, guardrails) | Stabilizing |
 | Recorder/Notifier split | Stable |
 | CLI + Dashboard | Stabilizing |
 | Client-tool bridge | Experimental |
 
-Built with [Claude Code](https://claude.ai/code) and [Codex](https://openai.com/codex). 773 tests, strict types, Apache 2.0.
+Built with [Claude Code](https://claude.ai/code) and [Codex](https://openai.com/codex). 898 tests, strict types, Apache 2.0.
 
 ## What Dendrux Is Not
 
