@@ -147,6 +147,35 @@ class CancelledNode:
     timestamp: datetime | None = None
 
 
+@dataclass
+class GovernanceEventNode:
+    """A governance event (deny, approval, budget, guardrail)."""
+
+    type: str = "governance_event"
+    sequence_index: int = 0
+    iteration: int = 0
+    event_type: str = ""
+    severity: str = "info"
+    title: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime | None = None
+
+
+# Severity + title mapping for governance events
+GOVERNANCE_EVENT_META: dict[str, tuple[str, str]] = {
+    "policy.denied": ("warning", "Tool denied"),
+    "approval.requested": ("pause", "Approval requested"),
+    "approval.decided": ("info", "Approval decided"),
+    "budget.threshold": ("warning", "Budget threshold"),
+    "budget.exceeded": ("warning", "Budget exceeded"),
+    "guardrail.detected": ("info", "Guardrail detected"),
+    "guardrail.redacted": ("info", "Guardrail redacted"),
+    "guardrail.blocked": ("error", "Guardrail blocked"),
+}
+
+_GOVERNANCE_EVENT_TYPES = frozenset(GOVERNANCE_EVENT_META)
+
+
 # Union of all node types
 TimelineNode = (
     RunStartedNode
@@ -156,6 +185,7 @@ TimelineNode = (
     | FinishNode
     | ErrorNode
     | CancelledNode
+    | GovernanceEventNode
 )
 
 
@@ -418,6 +448,20 @@ async def normalize_timeline(
                 )
             )
 
+        elif etype in _GOVERNANCE_EVENT_TYPES:
+            severity, title = GOVERNANCE_EVENT_META[etype]
+            nodes.append(
+                GovernanceEventNode(
+                    sequence_index=event.sequence_index,
+                    iteration=event.iteration_index,
+                    event_type=etype,
+                    severity=severity,
+                    title=title,
+                    data=data,
+                    timestamp=event.created_at,
+                )
+            )
+
         i += 1
 
     return NormalizedTimeline(
@@ -544,6 +588,17 @@ def _node_to_dict(node: TimelineNode) -> dict[str, Any]:
         return {
             "type": node.type,
             "sequence_index": node.sequence_index,
+            "timestamp": _utc_iso(node.timestamp),
+        }
+    if isinstance(node, GovernanceEventNode):
+        return {
+            "type": node.type,
+            "sequence_index": node.sequence_index,
+            "iteration": node.iteration,
+            "event_type": node.event_type,
+            "severity": node.severity,
+            "title": node.title,
+            "data": node.data,
             "timestamp": _utc_iso(node.timestamp),
         }
     return {"type": "unknown"}
