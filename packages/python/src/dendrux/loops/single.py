@@ -16,7 +16,15 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from dendrux.loops._helpers import notify_llm, notify_message, record_llm, record_message
+from dendrux.guardrails._engine import GuardrailEngine
+from dendrux.loops._helpers import (
+    notify_governance,
+    notify_llm,
+    notify_message,
+    record_governance,
+    record_llm,
+    record_message,
+)
 from dendrux.loops.base import Loop
 from dendrux.loops.react import _check_budget
 from dendrux.types import (
@@ -83,8 +91,17 @@ class SingleCall(Loop):
         initial_usage: UsageStats | None = None,
         provider_kwargs: dict[str, Any] | None = None,
         output_type: type[BaseModel] | None = None,
+        initial_pii_mapping: dict[str, str] | None = None,
     ) -> RunResult:
         """Execute a single LLM call and return the result."""
+        if output_type is not None and agent.guardrails:
+            raise ValueError(
+                "guardrails with output_type is not supported in this version. "
+                "Structured output is parsed before guardrail scanning, so PII "
+                "in the typed model would bypass redaction. Use guardrails "
+                "without output_type, or output_type without guardrails."
+            )
+
         is_resume = (
             initial_history is not None
             or initial_steps
@@ -113,6 +130,85 @@ class SingleCall(Loop):
             tool_defs=[],
         )
 
+        # Incoming guardrail — scan all messages
+        g_engine = GuardrailEngine(agent.guardrails) if agent.guardrails else None
+        if g_engine is not None:
+            all_in_findings: list[Any] = []
+            _in_was_redacted = False
+            for msg_idx, msg in enumerate(messages):
+                if not msg.content:
+                    continue
+                cleaned, findings, block_err = await g_engine.scan_incoming(msg.content)
+                if findings:
+                    all_in_findings.extend(findings)
+                if block_err is not None:
+                    await record_governance(
+                        recorder,
+                        "guardrail.blocked",
+                        1,
+                        {"direction": "incoming", "error": block_err},
+                    )
+                    await notify_governance(
+                        notifier,
+                        "guardrail.blocked",
+                        1,
+                        {"direction": "incoming", "error": block_err},
+                    )
+                    return RunResult(
+                        run_id=resolved_run_id,
+                        status=RunStatus.ERROR,
+                        error=block_err,
+                        steps=[],
+                        iteration_count=1,
+                        usage=UsageStats(),
+                    )
+                if cleaned != msg.content:
+                    _in_was_redacted = True
+                    messages[msg_idx] = Message(
+                        role=msg.role,
+                        content=cleaned,
+                        name=msg.name,
+                        tool_calls=msg.tool_calls,
+                        call_id=msg.call_id,
+                        meta=msg.meta,
+                    )
+            if all_in_findings:
+                _in_entities = list({f.entity_type for f in all_in_findings})
+                await record_governance(
+                    recorder,
+                    "guardrail.detected",
+                    1,
+                    {
+                        "direction": "incoming",
+                        "findings_count": len(all_in_findings),
+                        "entities": _in_entities,
+                    },
+                )
+                await notify_governance(
+                    notifier,
+                    "guardrail.detected",
+                    1,
+                    {
+                        "direction": "incoming",
+                        "findings_count": len(all_in_findings),
+                        "entities": _in_entities,
+                    },
+                )
+            if _in_was_redacted:
+                _red_entities = list({f.entity_type for f in all_in_findings})
+                await record_governance(
+                    recorder,
+                    "guardrail.redacted",
+                    1,
+                    {"direction": "incoming", "entities": _red_entities},
+                )
+                await notify_governance(
+                    notifier,
+                    "guardrail.redacted",
+                    1,
+                    {"direction": "incoming", "entities": _red_entities},
+                )
+
         t0 = time.monotonic()
 
         # Structured output path: use the structured helper
@@ -135,6 +231,126 @@ class SingleCall(Loop):
 
         llm_duration_ms = int((time.monotonic() - t0) * 1000)
 
+        # Output guardrail — scan BEFORE recording so persisted
+        # semantic_response never contains raw PII.
+        _sc_findings: dict[str, Any] = {}
+        if g_engine is not None and all_in_findings:
+            _sc_findings["incoming"] = [
+                {"entity_type": f.entity_type, "score": f.score} for f in all_in_findings
+            ]
+        if g_engine is not None and (response.text or response.tool_calls):
+            _orig_text = response.text
+            out_text, _, out_findings, out_block, _p_redacted = await g_engine.scan_outgoing(
+                response.text or ""
+            )
+            if out_findings:
+                _sc_findings["outgoing"] = [
+                    {"entity_type": f.entity_type, "score": f.score} for f in out_findings
+                ]
+                _out_data = {
+                    "direction": "outgoing",
+                    "findings_count": len(out_findings),
+                    "entities": list({f.entity_type for f in out_findings}),
+                }
+                await record_governance(
+                    recorder,
+                    "guardrail.detected",
+                    1,
+                    _out_data,
+                )
+                await notify_governance(
+                    notifier,
+                    "guardrail.detected",
+                    1,
+                    _out_data,
+                )
+            _text_changed = _orig_text is not None and out_text != _orig_text
+            if _text_changed:
+                from dendrux.types import LLMResponse as _LLMResp
+
+                response = _LLMResp(
+                    text=out_text,
+                    tool_calls=response.tool_calls,
+                    raw=response.raw,
+                    usage=response.usage,
+                    provider_request=response.provider_request,
+                    provider_response=response.provider_response,
+                )
+            if (_text_changed or _p_redacted) and out_findings:
+                _out_red = list({f.entity_type for f in out_findings})
+                await record_governance(
+                    recorder,
+                    "guardrail.redacted",
+                    1,
+                    {"direction": "outgoing", "entities": _out_red},
+                )
+                await notify_governance(
+                    notifier,
+                    "guardrail.redacted",
+                    1,
+                    {"direction": "outgoing", "entities": _out_red},
+                )
+            if out_block is not None:
+                # Scrub response before recording — block means the
+                # original text/params contain the PII that triggered it.
+                from dendrux.types import LLMResponse as _LLMResp2
+
+                _blocked_resp = _LLMResp2(
+                    text="[blocked by guardrail]",
+                    tool_calls=None,
+                    raw=response.raw,
+                    usage=response.usage,
+                    provider_request=response.provider_request,
+                    provider_response=None,
+                )
+                await record_llm(
+                    recorder,
+                    _blocked_resp,
+                    1,
+                    semantic_messages=messages,
+                    semantic_tools=None,
+                    duration_ms=llm_duration_ms,
+                    guardrail_findings=_sc_findings or None,
+                )
+                await notify_llm(
+                    notifier,
+                    _blocked_resp,
+                    1,
+                    semantic_messages=messages,
+                    semantic_tools=None,
+                    duration_ms=llm_duration_ms,
+                )
+                await _check_budget(
+                    agent.budget,
+                    response.usage,
+                    [],
+                    recorder,
+                    notifier,
+                    1,
+                    [],
+                )
+                await record_governance(
+                    recorder,
+                    "guardrail.blocked",
+                    1,
+                    {"direction": "outgoing", "error": out_block},
+                )
+                await notify_governance(
+                    notifier,
+                    "guardrail.blocked",
+                    1,
+                    {"direction": "outgoing", "error": out_block},
+                )
+                return RunResult(
+                    run_id=resolved_run_id,
+                    status=RunStatus.ERROR,
+                    error=out_block,
+                    steps=[],
+                    iteration_count=1,
+                    usage=response.usage,
+                )
+
+        # Record sanitized LLM response
         await record_llm(
             recorder,
             response,
@@ -142,6 +358,7 @@ class SingleCall(Loop):
             semantic_messages=messages,
             semantic_tools=None,
             duration_ms=llm_duration_ms,
+            guardrail_findings=_sc_findings or None,
         )
         await notify_llm(
             notifier,

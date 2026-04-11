@@ -47,6 +47,7 @@ async def record_llm(
     semantic_messages: list[Message] | None = None,
     semantic_tools: list[ToolDef] | None = None,
     duration_ms: int | None = None,
+    guardrail_findings: dict[str, Any] | None = None,
 ) -> None:
     """Record LLM completion to authoritative persistence. Exceptions propagate."""
     if recorder is None:
@@ -57,6 +58,7 @@ async def record_llm(
         semantic_messages=semantic_messages,
         semantic_tools=semantic_tools,
         duration_ms=duration_ms,
+        guardrail_findings=guardrail_findings,
     )
 
 

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from dendrux.guardrails._protocol import Guardrail
     from dendrux.llm.base import LLMProvider
     from dendrux.loops.base import Loop, LoopNotifier
     from dendrux.runtime.state import StateStore
@@ -108,6 +109,7 @@ class Agent:
         deny: list[str] | None = ...,
         require_approval: list[str] | None = ...,
         budget: Budget | None = ...,
+        guardrails: list[Guardrail] | None = ...,
     ) -> None: ...
 
     @overload
@@ -129,6 +131,7 @@ class Agent:
         deny: list[str] | None = ...,
         require_approval: list[str] | None = ...,
         budget: Budget | None = ...,
+        guardrails: list[Guardrail] | None = ...,
     ) -> None: ...
 
     def __init__(
@@ -149,6 +152,7 @@ class Agent:
         deny: list[str] | None = None,
         require_approval: list[str] | None = None,
         budget: Budget | None = None,
+        guardrails: list[Guardrail] | None = None,
     ) -> None:
         # --- Subclass guard: block class-level provider ---
         from dendrux.llm.base import LLMProvider as _LLMBase
@@ -202,6 +206,7 @@ class Agent:
             frozenset(require_approval) if require_approval else frozenset()
         )
         self._budget: Budget | None = budget
+        self._guardrails: list[Guardrail] | None = guardrails if guardrails else None
         self._lazy_store: StateStore | None = None
         self._private_engine: AsyncEngine | None = None
 
@@ -242,6 +247,11 @@ class Agent:
     def budget(self) -> Budget | None:
         """Advisory token budget, or None."""
         return self._budget
+
+    @property
+    def guardrails(self) -> list[Guardrail] | None:
+        """Content guardrails, or None."""
+        return self._guardrails
 
     @property
     def provider(self) -> LLMProvider | None:
@@ -814,6 +824,14 @@ class Agent:
             ValueError: If no provider is configured.
         """
         _validate_max_delegation_depth(max_delegation_depth)
+
+        if self._guardrails:
+            raise ValueError(
+                "guardrails are not supported with stream() in this version. "
+                "Guardrails require the full response before scanning. "
+                "Use agent.run() instead."
+            )
+
         provider = self._require_provider()
 
         if self._output_type is not None:
@@ -878,6 +896,11 @@ class Agent:
         Raises:
             ValueError: If provider not set, both args provided, or neither.
         """
+        if self._guardrails:
+            raise ValueError(
+                "guardrails are not supported with resume_stream() in this version. "
+                "Use agent.resume() instead."
+            )
         provider = self._require_provider()
         if tool_results is not None and user_input is not None:
             raise ValueError("Cannot provide both tool_results and user_input to resume_stream().")

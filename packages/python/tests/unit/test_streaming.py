@@ -584,6 +584,9 @@ class ResumeStateStore:
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         return self._pause_data.get(run_id)
 
+    async def get_pii_mapping(self, run_id: str) -> dict[str, str] | None:
+        return None
+
     async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
         if self._status.get(run_id) != expected_status:
             return False
@@ -645,6 +648,7 @@ class ResumeStateStore:
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> None:
         self.paused.append({"run_id": run_id, "status": status})
         self._pause_data[run_id] = pause_data

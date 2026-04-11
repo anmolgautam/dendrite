@@ -186,6 +186,7 @@ class PersistenceRecorder(LoopRecorder):
         semantic_messages: list[Message] | None = None,
         semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
+        guardrail_findings: dict[str, Any] | None = None,
     ) -> None:
         """Persist LLM interaction + usage + event."""
         semantic_request = None
@@ -239,6 +240,7 @@ class PersistenceRecorder(LoopRecorder):
                 semantic_response=semantic_response,
                 provider_request=response.provider_request,
                 provider_response=response.provider_response,
+                guardrail_findings=guardrail_findings,
             )
         except Exception:
             logger.warning(

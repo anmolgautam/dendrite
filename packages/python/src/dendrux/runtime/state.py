@@ -284,6 +284,7 @@ class StateStore(Protocol):
         semantic_response: dict[str, Any] | None = None,
         provider_request: dict[str, Any] | None = None,
         provider_response: dict[str, Any] | None = None,
+        guardrail_findings: dict[str, Any] | None = None,
     ) -> None: ...
 
     async def get_llm_interactions(self, run_id: str) -> list[LLMInteractionRecord]: ...
@@ -298,6 +299,7 @@ class StateStore(Protocol):
         iteration_count: int = 0,
         total_usage: UsageStats | None = None,
         expected_current_status: str | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> bool: ...
 
     async def pause_run(
@@ -307,9 +309,12 @@ class StateStore(Protocol):
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> None: ...
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def get_pii_mapping(self, run_id: str) -> dict[str, str] | None: ...
 
     async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool: ...
 
@@ -671,6 +676,7 @@ class SQLAlchemyStateStore:
         semantic_response: dict[str, Any] | None = None,
         provider_request: dict[str, Any] | None = None,
         provider_response: dict[str, Any] | None = None,
+        guardrail_findings: dict[str, Any] | None = None,
     ) -> None:
         from dendrux.db.models import LLMInteraction
 
@@ -689,6 +695,7 @@ class SQLAlchemyStateStore:
                 output_tokens=usage.output_tokens,
                 cost_usd=usage.cost_usd,
                 duration_ms=duration_ms,
+                guardrail_findings=guardrail_findings,
             )
             session.add(record)
             await session.commit()
@@ -735,6 +742,7 @@ class SQLAlchemyStateStore:
         iteration_count: int | None = None,
         total_usage: UsageStats | None = None,
         expected_current_status: str | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> bool:
         """Finalize a run. Returns True if the update was applied.
 
@@ -742,6 +750,8 @@ class SQLAlchemyStateStore:
             expected_current_status: If provided, only updates the row if the
                 current DB status matches. Returns False if status has changed
                 (e.g. already cancelled). This prevents cancel/finalize races.
+            pii_mapping: Final guardrail PII mapping. Persists past finalize
+                (audit-first — framework never auto-clears).
         """
         from sqlalchemy import func, update
 
@@ -763,6 +773,8 @@ class SQLAlchemyStateStore:
                     values["total_input_tokens"] = total_usage.input_tokens
                     values["total_output_tokens"] = total_usage.output_tokens
                     values["total_cost_usd"] = total_usage.cost_usd
+                if pii_mapping is not None:
+                    values["pii_mapping"] = pii_mapping
 
                 # Clear pause_data on finalize (D1: execution state cleaned up)
                 values["pause_data"] = None
@@ -794,6 +806,7 @@ class SQLAlchemyStateStore:
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> None:
         """Persist pause state and set WAITING status."""
         from sqlalchemy import func, update
@@ -809,6 +822,8 @@ class SQLAlchemyStateStore:
                 }
                 if iteration_count is not None:
                     values["iteration_count"] = iteration_count
+                if pii_mapping is not None:
+                    values["pii_mapping"] = pii_mapping
                 stmt = update(AgentRun).where(AgentRun.id == run_id).values(**values)
                 await session.execute(stmt)
                 await session.commit()
@@ -829,6 +844,20 @@ class SQLAlchemyStateStore:
             if row is None:
                 return None
             return dict(row)  # type narrowing for mypy
+
+    async def get_pii_mapping(self, run_id: str) -> dict[str, str] | None:
+        """Retrieve pii_mapping for a run. Returns None if not set."""
+        from sqlalchemy import select
+
+        from dendrux.db.models import AgentRun
+
+        async with self._session_factory() as session:
+            stmt = select(AgentRun.pii_mapping).where(AgentRun.id == run_id)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return dict(row)
 
     async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
         """Atomically transition a paused run to RUNNING.

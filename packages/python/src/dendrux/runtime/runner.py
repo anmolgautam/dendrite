@@ -425,11 +425,13 @@ async def run(
             ):
                 # Pause — persist state for resume
                 pause_state: PauseState = result.meta["pause_state"]
+                _run_pii = result.meta.get("pii_mapping")
                 await state_store.pause_run(
                     run_id,
                     status=result.status.value,
                     pause_data=pause_state.to_dict(),
                     iteration_count=result.iteration_count,
+                    pii_mapping=_run_pii,
                 )
                 await _emit_event(
                     state_store,
@@ -454,6 +456,7 @@ async def run(
                 redacted_answer = (
                     redact(result.answer) if redact and result.answer else result.answer
                 )
+                _run_pii = result.meta.get("pii_mapping")
                 finalize_won = await state_store.finalize_run(
                     run_id,
                     status=result.status.value,
@@ -461,6 +464,7 @@ async def run(
                     iteration_count=result.iteration_count,
                     total_usage=result.usage,
                     expected_current_status="running",
+                    pii_mapping=_run_pii,
                 )
                 # Only the CAS winner emits the terminal event — prevents
                 # duplicate run.completed when cancel races with finish.
@@ -1496,6 +1500,9 @@ async def _resume_core(
         raise ValueError(f"Run '{run_id}' has no pause state — cannot resume.")
     pause_state = PauseState.from_dict(raw_pause)
 
+    # 1a. Load pii_mapping for guardrail continuity across pause/resume
+    _saved_pii_mapping = await state_store.get_pii_mapping(run_id)
+
     # 1b. Verify agent identity — fail closed on mismatch (H-003)
     if pause_state.agent_name and pause_state.agent_name != agent.name:
         raise ValueError(
@@ -1647,6 +1654,7 @@ async def _resume_core(
             initial_steps=ctx.pause_state.steps,
             iteration_offset=ctx.pause_state.iteration,
             initial_usage=ctx.pause_state.usage,
+            initial_pii_mapping=_saved_pii_mapping,
         )
 
         # 10. Finalize or pause again
@@ -1656,11 +1664,13 @@ async def _resume_core(
             RunStatus.WAITING_APPROVAL,
         ):
             new_pause: PauseState = result.meta["pause_state"]
+            _resume_pii = result.meta.get("pii_mapping")
             await state_store.pause_run(
                 run_id,
                 status=result.status.value,
                 pause_data=new_pause.to_dict(),
                 iteration_count=result.iteration_count,
+                pii_mapping=_resume_pii,
             )
             await _emit_event(
                 state_store,
@@ -1681,6 +1691,7 @@ async def _resume_core(
             )
         else:
             redacted_answer = redact(result.answer) if redact and result.answer else result.answer
+            _resume_pii = result.meta.get("pii_mapping")
             finalize_won = await state_store.finalize_run(
                 run_id,
                 status=result.status.value,
@@ -1688,6 +1699,7 @@ async def _resume_core(
                 iteration_count=result.iteration_count,
                 total_usage=result.usage,
                 expected_current_status="running",
+                pii_mapping=_resume_pii,
             )
             result.meta["_finalize_won"] = finalize_won
             if finalize_won:

@@ -1,0 +1,70 @@
+"""Guardrail protocol and core types.
+
+Guardrails scan text crossing the LLM boundary. The framework owns
+the action logic (redact/block/warn) — guardrails only detect.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal, Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class Pattern:
+    """A named regex pattern for PII/secret detection.
+
+    Used by PII(extra_patterns=[...]) to extend built-in patterns
+    with domain-specific detectors.
+
+    Args:
+        name: Entity type name (e.g. "EMPLOYEE_ID"). Becomes the
+            placeholder prefix: <<EMPLOYEE_ID_1>>.
+        regex: Raw regex pattern string.
+    """
+
+    name: str
+    regex: str
+
+
+@dataclass(frozen=True)
+class Finding:
+    """A single detection result from a guardrail scan.
+
+    Framework uses these to apply actions (redact/block/warn).
+    Guardrails produce them; framework consumes them.
+
+    Args:
+        entity_type: What was found (e.g. "EMAIL", "AWS_ACCESS_KEY").
+        start: Character offset in the scanned text.
+        end: Character offset (exclusive).
+        score: Confidence score (0.0-1.0). Regex patterns use 1.0.
+        text: The matched text content.
+    """
+
+    entity_type: str
+    start: int
+    end: int
+    score: float
+    text: str
+
+
+@runtime_checkable
+class Guardrail(Protocol):
+    """Protocol for content guardrails.
+
+    Guardrails detect findings in text. The framework applies actions:
+      - redact: replace findings with <<TYPE_N>> placeholders
+      - block: terminate the run with an error
+      - warn: log the finding, continue unchanged
+
+    scan() is async to support LLM-as-judge implementations that
+    call a local model for evaluation. Regex/Presidio scanners
+    simply don't await anything inside their async scan().
+    """
+
+    action: Literal["redact", "block", "warn"]
+
+    async def scan(self, text: str) -> list[Finding]:
+        """Detect findings in text. Framework handles the action."""
+        ...

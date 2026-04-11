@@ -156,6 +156,28 @@ class ConsoleNotifier(LoopNotifier):
                 f"[bold]exceeded[/bold] "
                 f"[dim]({used:,} / {max_t:,} tokens)[/dim]"
             )
+        elif event_type == "guardrail.detected":
+            direction = data.get("direction", "")
+            count = data.get("findings_count", 0)
+            entities = data.get("entities", [])
+            _console.print(
+                f"  [bright_cyan]  guard[/bright_cyan]  "
+                f"[bold]{count} finding(s)[/bold] "
+                f"[dim]{direction} ({', '.join(entities)})[/dim]"
+            )
+        elif event_type == "guardrail.redacted":
+            direction = data.get("direction", "")
+            entities = data.get("entities", [])
+            _console.print(
+                f"  [bright_magenta]  guard[/bright_magenta]  "
+                f"[bold]redacted[/bold] "
+                f"[dim]{direction} ({', '.join(entities)})[/dim]"
+            )
+        elif event_type == "guardrail.blocked":
+            error = data.get("error", "blocked")
+            _console.print(
+                f"  [bright_red]  guard[/bright_red]  [bold]blocked[/bold] [dim]{error}[/dim]"
+            )
         else:
             tool_name = data.get("tool_name", "")
             reason = data.get("reason", event_type)

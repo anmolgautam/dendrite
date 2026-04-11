@@ -67,6 +67,7 @@ class LoopRecorder(Protocol):
         semantic_messages: list[Message] | None = None,
         semantic_tools: list[ToolDef] | None = None,
         duration_ms: int | None = None,
+        guardrail_findings: dict[str, Any] | None = None,
     ) -> None: ...
 
     async def on_tool_completed(
@@ -186,6 +187,7 @@ class Loop(ABC):
         initial_usage: UsageStats | None = None,
         provider_kwargs: dict[str, Any] | None = None,
         output_type: type[BaseModel] | None = None,
+        initial_pii_mapping: dict[str, str] | None = None,
     ) -> RunResult:
         """Execute the agent loop until completion.
 

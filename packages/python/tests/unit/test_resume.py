@@ -111,6 +111,7 @@ class RecordingStateStore:
         status: str,
         pause_data: dict[str, Any],
         iteration_count: int | None = None,
+        pii_mapping: dict[str, str] | None = None,
     ) -> None:
         self.paused_runs.append(
             {
@@ -125,6 +126,9 @@ class RecordingStateStore:
 
     async def get_pause_state(self, run_id: str) -> dict[str, Any] | None:
         return self._pause_data.get(run_id)
+
+    async def get_pii_mapping(self, run_id: str) -> dict[str, str] | None:
+        return None
 
     async def claim_paused_run(self, run_id: str, *, expected_status: str) -> bool:
         if self._run_status.get(run_id) != expected_status:

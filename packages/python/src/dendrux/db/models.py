@@ -88,6 +88,9 @@ class AgentRun(Base):
     # Cleared on finalize. Contains unredacted history for correct LLM resume.
     pause_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Guardrail PII mapping — audit-first, NOT cleared on finalize
+    pii_mapping: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     # Error details (populated on ERROR status)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -267,6 +270,9 @@ class LLMInteraction(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Guardrail findings — best-effort enrichment (not authoritative audit)
+    guardrail_findings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
