@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[dev,db,anthropic]"
+        run: pip install -e ".[dev,all]"
 
       - name: Lint
         run: ruff check .
@@ -35,4 +35,4 @@ jobs:
         run: mypy src/dendrux/
 
       - name: Test
-        run: pytest tests/ -v --cov=src/dendrite --cov-report=term-missing --cov-fail-under=80
+        run: pytest tests/ -v --cov=src/dendrux --cov-report=term-missing --cov-fail-under=80
