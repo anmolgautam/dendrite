@@ -29,7 +29,9 @@ export function PauseBoundary({ node, isSelected, onSelect }: PauseBoundaryProps
       {/* Pause card — centered, dramatic */}
       <div className="p-6 sm:p-8 rounded-2xl bg-state-paused/[0.05] border border-state-paused/10 flex flex-col items-center justify-center text-center">
         <span className="text-[10px] uppercase tracking-[0.2em] text-state-paused font-bold mb-2">
-          Suspended Bridge
+          {node.pause_status === "waiting_approval" ? "Awaiting Approval" :
+           node.pause_status === "waiting_human_input" ? "Awaiting Input" :
+           "Suspended Bridge"}
         </span>
 
         {/* The hero number */}

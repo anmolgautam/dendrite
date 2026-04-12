@@ -82,6 +82,17 @@ export interface CancelledNode {
   timestamp: string | null;
 }
 
+export interface GovernanceEventNode {
+  type: "governance_event";
+  sequence_index: number;
+  iteration: number;
+  event_type: string;
+  severity: string;
+  title: string;
+  data: Record<string, unknown>;
+  timestamp: string | null;
+}
+
 export type TimelineNode =
   | RunStartedNode
   | LLMCallNode
@@ -89,7 +100,8 @@ export type TimelineNode =
   | PauseSegmentNode
   | FinishNode
   | ErrorNode
-  | CancelledNode;
+  | CancelledNode
+  | GovernanceEventNode;
 
 // -- Run summary --
 

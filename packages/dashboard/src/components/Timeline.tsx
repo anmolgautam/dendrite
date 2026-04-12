@@ -20,6 +20,7 @@ const NODE_CONFIG: Record<string, {
   finish: { icon: "check", color: "text-canvas", border: "border-white/20", spine: "bg-white/15", glow: "glow-white" },
   error: { icon: "error", color: "text-state-error", border: "border-state-error/50", spine: "bg-state-error", glow: "glow-red" },
   cancelled: { icon: "cancel", color: "text-text-muted", border: "border-white/10", spine: "bg-white/10", glow: "glow-white" },
+  governance_event: { icon: "shield", color: "text-purple-400", border: "border-purple-500/40", spine: "bg-purple-500/30", glow: "glow-purple" },
 };
 
 export function Timeline({ nodes }: TimelineProps) {
